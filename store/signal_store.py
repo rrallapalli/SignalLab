@@ -224,14 +224,20 @@ class SignalStore:
     def get_confidence_history(self, ticker: str, limit: int = 8) -> list[dict]:
         rows = self._conn.execute("""
             SELECT quarter, fiscal_year, score, previous_score, change,
+                   confidence_level, uncertainty_level, defensiveness,
+                   specificity, consistency, forward_strength,
                    tone, drivers, summary, generated_at
             FROM confidence_signals
             WHERE ticker = ?
             ORDER BY fiscal_year DESC, quarter DESC
             LIMIT ?
         """, [ticker, limit]).fetchall()
-        cols = ["quarter","fiscal_year","score","previous_score","change",
-                "tone","drivers","summary","generated_at"]
+        cols = [
+            "quarter", "fiscal_year", "score", "previous_score", "change",
+            "confidence_level", "uncertainty_level", "defensiveness",
+            "specificity", "consistency", "forward_strength",
+            "tone", "drivers", "summary", "generated_at",
+        ]
         result = []
         for row in rows:
             d = dict(zip(cols, row))
