@@ -425,6 +425,35 @@ with c3: st.markdown(f"<div class='col-header col-yoy'>📅 YoY vs<br>{label_y}<
 
 st.divider()
 
+# ── Data coverage banner ──────────────────────────────────────────────────────
+
+def _has_signal(b, key):
+    if not b or not isinstance(b, dict): return False
+    sig = b.get(key)
+    if not sig or not isinstance(sig, dict): return False
+    return sig.get("score") is not None or sig.get("overall_shift") is not None or sig.get("overall_risk_direction") is not None
+
+_coverage = {
+    label_l: {"Confidence": _has_signal(latest_b,"confidence"), "Narrative": _has_signal(latest_b,"narrative"), "Guidance": _has_signal(latest_b,"guidance"), "Risk": _has_signal(latest_b,"risk")},
+    label_q: {"Confidence": _has_signal(qoq_b,"confidence"),    "Narrative": _has_signal(qoq_b,"narrative"),    "Guidance": _has_signal(qoq_b,"guidance"),    "Risk": _has_signal(qoq_b,"risk")},
+    label_y: {"Confidence": _has_signal(yoy_b,"confidence"),    "Narrative": _has_signal(yoy_b,"narrative"),    "Guidance": _has_signal(yoy_b,"guidance"),    "Risk": _has_signal(yoy_b,"risk")},
+}
+_missing = [
+    f"**{period}**: {', '.join(s for s, ok in sigs.items() if not ok)}"
+    for period, sigs in _coverage.items()
+    if not all(sigs.values())
+]
+if _missing:
+    with st.expander("⚠️ Some periods have incomplete data — click for details", expanded=False):
+        st.markdown(
+            "These periods are missing one or more signal types. "
+            "Re-run the pipeline to fill gaps.\n\n" +
+            "\n\n".join(f"- {m}" for m in _missing)
+        )
+        st.caption("This usually means the ticker was last run with an older version of the code, or the pipeline hit a rate limit mid-run.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 # ════════════════════════════════════════════════════════════
 # TABS
