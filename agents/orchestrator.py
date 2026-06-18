@@ -123,6 +123,7 @@ async def _ingest_quarter(
                 quarter=doc.quarter, fiscal_year=doc.fiscal_year,
                 source_url=doc.source_url, title=doc.title,
                 chunk_count=n, doc_id=doc.doc_id,
+                raw_text=doc.raw_text,
             )
         except Exception as e:
             logger.warning(f"[ingest] Chunk/embed failed for {doc.doc_id}: {e}")

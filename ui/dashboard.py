@@ -118,6 +118,54 @@ def _pill(text: str, cls: str) -> str:
     return f"<span class='status-pill {cls}'>{text}</span>"
 
 
+# ── Citation renderer ─────────────────────────────────────────────────────────
+
+_DOC_ICONS = {
+    "earnings_call":          "📞",
+    "press_release":          "📰",
+    "annual_report":          "📋",
+    "investor_presentation":  "📊",
+    "news_article":           "🗞️",
+    "broker_note":            "🔬",
+    "management_commentary":  "💬",
+}
+
+
+def _render_citations(citations: list, label: str = "Evidence") -> None:
+    """Render a collapsible evidence block with source links."""
+    if not citations:
+        return
+    with st.expander(f"📎 {label} — {len(citations)} citation(s)", expanded=False):
+        for c in citations[:8]:
+            doc_type   = c.get("doc_type", "") if isinstance(c, dict) else ""
+            quarter    = c.get("quarter", "")  if isinstance(c, dict) else ""
+            speaker    = c.get("speaker", "")  if isinstance(c, dict) else ""
+            url        = c.get("source_url","") if isinstance(c, dict) else ""
+            quote      = c.get("quote","")      if isinstance(c, dict) else ""
+            relevance  = float(c.get("relevance", 1.0) if isinstance(c, dict) else 1.0)
+
+            icon       = _DOC_ICONS.get(doc_type, "📄")
+            type_label = doc_type.replace("_", " ").title()
+            speaker_html = f" &nbsp;·&nbsp; <span style='color:#a78bfa'>{speaker}</span>" if speaker else ""
+            url_html = (
+                f" &nbsp;·&nbsp; <a href='{url}' target='_blank' "
+                f"style='color:#67e8f9;text-decoration:none'>↗ source</a>"
+            ) if url else ""
+
+            st.markdown(f"""
+            <div style='background:#0a0a1a;border-radius:8px;padding:0.65rem 1rem;
+                        margin:0.3rem 0;border-left:3px solid #4f46e5'>
+                <div style='color:#475569;font-size:0.73rem;margin-bottom:0.3rem'>
+                    {icon} {type_label} &nbsp;·&nbsp; {quarter}{speaker_html}{url_html}
+                    <span style='float:right;color:#334155'>relevance {relevance:.2f}</span>
+                </div>
+                <div style='color:#cbd5e1;font-size:0.87rem;font-style:italic;line-height:1.5'>
+                    "{quote}"
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
 def _get(bundle: dict | None, *path, default=None):
     """Safe nested dict getter."""
     if bundle is None: return default
@@ -348,6 +396,7 @@ else:
                 "tone":              conf_row.get("tone"),
                 "summary":           conf_row.get("summary",""),
                 "drivers":           conf_row.get("drivers",[]),
+                "citations":         conf_row.get("citations",[]),
                 "confidence_level":  conf_row.get("confidence_level"),
                 "uncertainty_level": conf_row.get("uncertainty_level"),
                 "defensiveness":     conf_row.get("defensiveness"),
@@ -363,6 +412,7 @@ else:
                 "emerging":       (narr_row or {}).get("emerging",[]),
                 "fading":         (narr_row or {}).get("fading",[]),
                 "newly_risky":    (narr_row or {}).get("newly_risky",[]),
+                "citations":      (narr_row or {}).get("citations",[]),
             },
             "guidance": {
                 "score":            (guid_row or {}).get("score"),
@@ -373,6 +423,7 @@ else:
                 "serial_miss_risk": (guid_row or {}).get("serial_miss_risk", False),
                 "recent_pattern":   (guid_row or {}).get("recent_pattern", []),
                 "summary":          (guid_row or {}).get("summary", ""),
+                "citations":        (guid_row or {}).get("citations", []),
             },
             "risk": {
                 "overall_risk_direction": (risk_row or {}).get("overall_risk_direction"),
@@ -381,6 +432,7 @@ else:
                 "escalating":  (risk_row or {}).get("escalating", []),
                 "diminishing": (risk_row or {}).get("diminishing", []),
                 "summary":     (risk_row or {}).get("summary", ""),
+                "citations":   (risk_row or {}).get("citations", []),
             },
         }
 
@@ -459,8 +511,8 @@ if _missing:
 # TABS
 # ════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🎯 Confidence", "📈 Narrative", "✅ Guidance", "⚠️ Risks", "🕒 Trend"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "🎯 Confidence", "📈 Narrative", "✅ Guidance", "⚠️ Risks", "🕒 Trend", "🔗 Sources"
 ])
 
 
@@ -597,6 +649,11 @@ with tab1:
 
     st.divider()
 
+    # Citations
+    _render_citations(lc.get("citations",[]) or [], "Confidence Evidence")
+
+    st.divider()
+
     # Summaries + drivers
     st.markdown("#### Signal Narratives")
     r1, r2, r3 = st.columns(3)
@@ -693,6 +750,8 @@ with tab2:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     else:
         st.caption("No theme data available.")
+
+    _render_citations(ln.get("citations",[]) or [], "Narrative Evidence")
 
 
 # ── Tab 3: Guidance Credibility ───────────────────────────────────────────────
@@ -803,6 +862,8 @@ with tab3:
             if summary:
                 st.markdown(f"<div class='signal-card'><p style='color:#e2e8f0;font-size:0.85rem;margin:0;line-height:1.55'>{summary}</p></div>", unsafe_allow_html=True)
 
+    _render_citations(lg.get("citations",[]) or [], "Guidance Evidence")
+
 
 # ── Tab 4: Risk Emergence ─────────────────────────────────────────────────────
 
@@ -912,6 +973,9 @@ with tab4:
                 st.markdown(f"<div class='signal-card' style='border-left-color:#ef4444;margin-top:0.6rem'><p style='color:#e2e8f0;font-size:0.85rem;margin:0;line-height:1.55'>{summary}</p></div>", unsafe_allow_html=True)
 
 
+    _render_citations(lr.get("citations",[]) or [], "Risk Evidence")
+
+
 # ── Tab 5: Trend History ──────────────────────────────────────────────────────
 
 with tab5:
@@ -952,3 +1016,80 @@ with tab5:
                 "Risk":       (rr.get("overall_risk_direction","") or "").title() if rr else "—",
             })
         st.dataframe(pd.DataFrame(all_rows), use_container_width=True, hide_index=True)
+
+
+# ── Tab 6: Sources ────────────────────────────────────────────────────────────
+
+with tab6:
+    st.markdown("### Source Documents")
+    st.caption(
+        "All documents ingested for this ticker. Each row is a source that provided "
+        "evidence for the signal agents. Click ↗ to open the original document."
+    )
+
+    source_docs = ss.get_source_documents(active_ticker)
+
+    if not source_docs:
+        st.info("No source documents found. Run the pipeline to ingest documents.")
+    else:
+        # Summary counts by doc type
+        from collections import Counter
+        type_counts = Counter(d.get("doc_type","unknown") for d in source_docs)
+        type_cols = st.columns(min(len(type_counts), 5))
+        for i, (dtype, count) in enumerate(sorted(type_counts.items())):
+            icon = _DOC_ICONS.get(dtype, "📄")
+            with type_cols[i % len(type_cols)]:
+                st.metric(f"{icon} {dtype.replace('_',' ').title()}", count)
+
+        st.divider()
+
+        # Filter by quarter
+        all_quarters_in_docs = sorted(
+            set(f"{d.get('quarter','')} {d.get('fiscal_year','')}" for d in source_docs),
+            reverse=True,
+        )
+        selected_source_q = st.selectbox(
+            "Filter by quarter", ["All quarters"] + all_quarters_in_docs,
+            key="sources_quarter_filter",
+        )
+
+        # Display documents
+        filtered = source_docs if selected_source_q == "All quarters" else [
+            d for d in source_docs
+            if f"{d.get('quarter','')} {d.get('fiscal_year','')}" == selected_source_q
+        ]
+
+        for doc in filtered:
+            dtype     = doc.get("doc_type", "")
+            quarter   = f"{doc.get('quarter','')} {doc.get('fiscal_year','')}"
+            title     = doc.get("title","") or "Untitled"
+            url       = doc.get("source_url","")
+            chunks    = doc.get("chunk_count", 0)
+            icon      = _DOC_ICONS.get(dtype, "📄")
+            type_label = dtype.replace("_"," ").title()
+
+            url_html = (
+                f"<a href='{url}' target='_blank' "
+                f"style='color:#67e8f9;font-size:0.8rem;text-decoration:none'>↗ open source</a>"
+            ) if url else "<span style='color:#334155;font-size:0.8rem'>no URL</span>"
+
+            st.markdown(f"""
+            <div style='background:#1e1e2e;border-radius:8px;padding:0.8rem 1.1rem;
+                        margin:0.35rem 0;border-left:3px solid #4f46e5;
+                        display:flex;align-items:center;justify-content:space-between;
+                        flex-wrap:wrap;gap:0.5rem'>
+                <div>
+                    <span style='color:#a78bfa;font-size:0.75rem;font-weight:700;
+                                 text-transform:uppercase;letter-spacing:0.06em'>
+                        {icon} {type_label} &nbsp;·&nbsp; {quarter}
+                    </span>
+                    <div style='color:#e2e8f0;font-size:0.9rem;margin-top:0.15rem'>
+                        {title[:100]}{"…" if len(title) > 100 else ""}
+                    </div>
+                </div>
+                <div style='text-align:right;min-width:120px'>
+                    <div style='color:#475569;font-size:0.75rem'>{chunks} chunks extracted</div>
+                    <div style='margin-top:0.2rem'>{url_html}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)

@@ -1,7 +1,6 @@
 """
 store/signal_store.py
-DuckDB-backed time-series store for structured signals.
-Uses explicit column lists in all INSERTs to avoid placeholder mismatches.
+DuckDB-backed time-series store for structured signals and source documents.
 """
 
 from __future__ import annotations
@@ -102,13 +101,18 @@ CREATE TABLE IF NOT EXISTS ingested_documents (
     source_url   VARCHAR,
     title        VARCHAR,
     chunk_count  INTEGER,
-    ingested_at  TIMESTAMP
+    ingested_at  TIMESTAMP,
+    raw_text     VARCHAR
 );
 """
 
+# Migration: add raw_text to existing DBs that predate this column
+MIGRATIONS = [
+    "ALTER TABLE ingested_documents ADD COLUMN IF NOT EXISTS raw_text VARCHAR;",
+]
+
 
 def _j(val: Any) -> str:
-    """Safely serialize to JSON string."""
     try:
         return json.dumps(val)
     except Exception:
@@ -121,6 +125,11 @@ class SignalStore:
         self.db_path = str(settings.DUCKDB_PATH)
         self._conn = duckdb.connect(self.db_path)
         self._conn.execute(DDL)
+        for migration in MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except Exception:
+                pass   # column already exists
         logger.info(f"SignalStore ready at {self.db_path}")
 
     def _sig_id(self, prefix: str, ticker: str, quarter: str) -> str:
@@ -167,7 +176,6 @@ class SignalStore:
             sig.overall_shift, sig.shift_summary,
             _j([c.model_dump() for c in sig.citations]),
         ])
-        logger.debug(f"Saved narrative signal {sig.ticker} {sig.quarter}")
 
     def save_guidance(self, sig: GuidanceSignal) -> None:
         self._conn.execute("""
@@ -188,7 +196,6 @@ class SignalStore:
             sig.summary,
             _j([c.model_dump() for c in sig.citations]),
         ])
-        logger.debug(f"Saved guidance signal {sig.ticker} {sig.quarter}")
 
     def save_risk(self, sig: RiskSignal) -> None:
         self._conn.execute("""
@@ -206,18 +213,24 @@ class SignalStore:
             sig.summary,
             _j([c.model_dump() for c in sig.citations]),
         ])
-        logger.debug(f"Saved risk signal {sig.ticker} {sig.quarter}")
 
-    def log_document(self, ticker: str, company: str, doc_type: str,
-                     quarter: str, fiscal_year: int, source_url: str,
-                     title: str, chunk_count: int, doc_id: str) -> None:
+    def log_document(
+        self, ticker: str, company: str, doc_type: str,
+        quarter: str, fiscal_year: int, source_url: str,
+        title: str, chunk_count: int, doc_id: str,
+        raw_text: str = "",
+    ) -> None:
+        """Persist source document metadata and raw text for citation traceability."""
         self._conn.execute("""
             INSERT OR REPLACE INTO ingested_documents
                 (doc_id, ticker, company, doc_type, quarter, fiscal_year,
-                 source_url, title, chunk_count, ingested_at)
-            VALUES (?,?,?,?,?,?, ?,?,?,?)
-        """, [doc_id, ticker, company, doc_type, quarter, fiscal_year,
-              source_url, title, chunk_count, datetime.utcnow()])
+                 source_url, title, chunk_count, ingested_at, raw_text)
+            VALUES (?,?,?,?,?,?, ?,?,?,?,?)
+        """, [
+            doc_id, ticker, company, doc_type, quarter, fiscal_year,
+            source_url, title, chunk_count, datetime.utcnow(),
+            raw_text[:50000] if raw_text else "",   # cap at 50k chars
+        ])
 
     # ── Query methods ─────────────────────────────────────────────────────────
 
@@ -226,7 +239,7 @@ class SignalStore:
             SELECT quarter, fiscal_year, score, previous_score, change,
                    confidence_level, uncertainty_level, defensiveness,
                    specificity, consistency, forward_strength,
-                   tone, drivers, summary, generated_at
+                   tone, drivers, summary, citations, generated_at
             FROM confidence_signals
             WHERE ticker = ?
             ORDER BY fiscal_year DESC, quarter DESC
@@ -236,147 +249,158 @@ class SignalStore:
             "quarter", "fiscal_year", "score", "previous_score", "change",
             "confidence_level", "uncertainty_level", "defensiveness",
             "specificity", "consistency", "forward_strength",
-            "tone", "drivers", "summary", "generated_at",
+            "tone", "drivers", "summary", "citations", "generated_at",
         ]
         result = []
         for row in rows:
             d = dict(zip(cols, row))
-            d["drivers"] = json.loads(d["drivers"] or "[]")
+            d["drivers"]   = json.loads(d["drivers"]   or "[]")
+            d["citations"] = json.loads(d["citations"] or "[]")
             result.append(d)
         return result
 
     def get_narrative_history(self, ticker: str, limit: int = 8) -> list[dict]:
         rows = self._conn.execute("""
             SELECT quarter, fiscal_year, accelerating, emerging, fading,
-                   newly_risky, overall_shift, shift_summary, themes, generated_at
+                   newly_risky, overall_shift, shift_summary, themes,
+                   citations, generated_at
             FROM narrative_signals WHERE ticker = ?
             ORDER BY fiscal_year DESC, quarter DESC LIMIT ?
         """, [ticker, limit]).fetchall()
-        cols = ["quarter","fiscal_year","accelerating","emerging","fading",
-                "newly_risky","overall_shift","shift_summary","themes","generated_at"]
+        cols = [
+            "quarter", "fiscal_year", "accelerating", "emerging", "fading",
+            "newly_risky", "overall_shift", "shift_summary", "themes",
+            "citations", "generated_at",
+        ]
         result = []
         for row in rows:
             d = dict(zip(cols, row))
-            for f in ["accelerating","emerging","fading","newly_risky","themes"]:
+            for f in ["accelerating", "emerging", "fading", "newly_risky", "themes"]:
                 d[f] = json.loads(d[f] or "[]")
+            d["citations"] = json.loads(d["citations"] or "[]")
             result.append(d)
         return result
 
     def get_guidance_history(self, ticker: str, limit: int = 8) -> list[dict]:
         rows = self._conn.execute("""
             SELECT quarter, fiscal_year, score, beats, misses, in_line,
-                   beat_rate, serial_miss_risk, recent_pattern, summary, generated_at
+                   beat_rate, serial_miss_risk, recent_pattern, summary,
+                   citations, generated_at
             FROM guidance_signals WHERE ticker = ?
             ORDER BY fiscal_year DESC, quarter DESC LIMIT ?
         """, [ticker, limit]).fetchall()
-        cols = ["quarter","fiscal_year","score","beats","misses","in_line",
-                "beat_rate","serial_miss_risk","recent_pattern","summary","generated_at"]
+        cols = [
+            "quarter", "fiscal_year", "score", "beats", "misses", "in_line",
+            "beat_rate", "serial_miss_risk", "recent_pattern", "summary",
+            "citations", "generated_at",
+        ]
         result = []
         for row in rows:
             d = dict(zip(cols, row))
             d["recent_pattern"] = json.loads(d["recent_pattern"] or "[]")
+            d["citations"]      = json.loads(d["citations"]      or "[]")
             result.append(d)
         return result
 
     def get_risk_history(self, ticker: str, limit: int = 8) -> list[dict]:
         rows = self._conn.execute("""
             SELECT quarter, fiscal_year, risks, new_risks, escalating,
-                   diminishing, overall_risk_direction, summary, generated_at
+                   diminishing, overall_risk_direction, summary,
+                   citations, generated_at
             FROM risk_signals WHERE ticker = ?
             ORDER BY fiscal_year DESC, quarter DESC LIMIT ?
         """, [ticker, limit]).fetchall()
-        cols = ["quarter","fiscal_year","risks","new_risks","escalating",
-                "diminishing","overall_risk_direction","summary","generated_at"]
+        cols = [
+            "quarter", "fiscal_year", "risks", "new_risks", "escalating",
+            "diminishing", "overall_risk_direction", "summary",
+            "citations", "generated_at",
+        ]
         result = []
         for row in rows:
             d = dict(zip(cols, row))
-            for f in ["risks","new_risks","escalating","diminishing"]:
+            for f in ["risks", "new_risks", "escalating", "diminishing"]:
                 d[f] = json.loads(d[f] or "[]")
+            d["citations"] = json.loads(d["citations"] or "[]")
             result.append(d)
         return result
 
-    def get_all_tickers(self) -> list[str]:
+    def get_source_documents(
+        self, ticker: str, quarter: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        """Return ingested source documents for a ticker, optionally filtered by quarter."""
+        where = "WHERE ticker = ?"
+        params: list = [ticker]
+        if quarter:
+            where += " AND quarter = ?"
+            params.append(quarter)
+        rows = self._conn.execute(f"""
+            SELECT doc_id, doc_type, quarter, fiscal_year, title,
+                   source_url, chunk_count, ingested_at
+            FROM ingested_documents
+            {where}
+            ORDER BY fiscal_year DESC, quarter DESC, ingested_at DESC
+            LIMIT {limit}
+        """, params).fetchall()
+        cols = ["doc_id", "doc_type", "quarter", "fiscal_year",
+                "title", "source_url", "chunk_count", "ingested_at"]
+        return [dict(zip(cols, row)) for row in rows]
+
+    def get_document_text(self, doc_id: str) -> str | None:
+        """Retrieve stored raw text for a specific document."""
         rows = self._conn.execute(
-            "SELECT DISTINCT ticker FROM confidence_signals ORDER BY ticker"
+            "SELECT raw_text FROM ingested_documents WHERE doc_id = ?", [doc_id]
         ).fetchall()
-        return [r[0] for r in rows]
+        return rows[0][0] if rows else None
 
     # ── YTD helpers ───────────────────────────────────────────────────────────
 
     def get_ytd_guidance(self, ticker: str, year: int) -> dict:
-        """
-        Aggregate guidance beats / misses / in_line across all quarters
-        in `year`. Returns a summary dict with YTD hit rate.
-        """
         rows = self._conn.execute("""
             SELECT beats, misses, in_line, quarter, guidance_items
             FROM guidance_signals
             WHERE ticker = ? AND fiscal_year = ?
             ORDER BY quarter
         """, [ticker, year]).fetchall()
-
-        if not rows:
-            return {}
+        if not rows: return {}
 
         total_beats = total_misses = total_in_line = 0
-        quarters_covered = []
-        all_items = []
-
+        quarters_covered, all_items = [], []
         for beats, misses, in_line, quarter, items_json in rows:
             total_beats   += int(beats  or 0)
             total_misses  += int(misses or 0)
             total_in_line += int(in_line or 0)
             quarters_covered.append(quarter)
-            try:
-                items = json.loads(items_json or "[]")
-                all_items.extend(items)
-            except Exception:
-                pass
+            try: all_items.extend(json.loads(items_json or "[]"))
+            except Exception: pass
 
         total_tracked = total_beats + total_misses + total_in_line
         ytd_rate = total_beats / total_tracked if total_tracked > 0 else 0.0
 
-        # Find any serial misses (same metric missed in 2+ quarters)
         from collections import Counter
         miss_counts = Counter(
-            item.get("metric","")
-            for item in all_items
-            if item.get("outcome","") == "miss"
+            item.get("metric","") for item in all_items if item.get("outcome","") == "miss"
         )
         serial_misses = [m for m, c in miss_counts.items() if c >= 2]
-
         return {
-            "year":             year,
-            "quarters_covered": quarters_covered,
-            "total_beats":      total_beats,
-            "total_misses":     total_misses,
-            "total_in_line":    total_in_line,
-            "total_tracked":    total_tracked,
-            "ytd_beat_rate":    round(ytd_rate, 3),
-            "serial_misses":    serial_misses,
+            "year": year, "quarters_covered": quarters_covered,
+            "total_beats": total_beats, "total_misses": total_misses,
+            "total_in_line": total_in_line, "total_tracked": total_tracked,
+            "ytd_beat_rate": round(ytd_rate, 3), "serial_misses": serial_misses,
         }
 
     def get_ytd_risks(self, ticker: str, year: int) -> dict:
-        """
-        Aggregate risk signals across all quarters in `year`.
-        Returns newly emerged risks, escalating risks, and a deduplicated
-        count of distinct risks that were flagged as material this year.
-        """
         rows = self._conn.execute("""
             SELECT quarter, new_risks, escalating, diminishing, risks
             FROM risk_signals
             WHERE ticker = ? AND fiscal_year = ?
             ORDER BY quarter
         """, [ticker, year]).fetchall()
+        if not rows: return {}
 
-        if not rows:
-            return {}
-
-        all_new:        list[str] = []
+        all_new: list[str] = []
         all_escalating: list[str] = []
         all_diminishing: list[str] = []
-        quarters_covered = []
-        severity_map: dict[str, str] = {}   # risk name → worst severity seen
+        quarters_covered, severity_map = [], {}
 
         for quarter, new_j, esc_j, dim_j, risks_j in rows:
             quarters_covered.append(quarter)
@@ -388,26 +412,26 @@ class SignalStore:
                 for r in json.loads(dim_j or "[]"):
                     if r not in all_diminishing: all_diminishing.append(r)
                 for item in json.loads(risks_j or "[]"):
-                    name = item.get("risk","")
-                    sev  = item.get("severity","low")
+                    name, sev = item.get("risk",""), item.get("severity","low")
                     sev_order = {"critical":4,"high":3,"medium":2,"low":1}
                     if name and sev_order.get(sev,0) > sev_order.get(severity_map.get(name,"low"),0):
                         severity_map[name] = sev
-            except Exception:
-                pass
+            except Exception: pass
 
-        # Risks still active (new or escalating, not subsequently diminished)
         resolved = set(all_diminishing)
-        active_new = [r for r in all_new if r not in resolved]
-
         return {
-            "year":              year,
-            "quarters_covered":  quarters_covered,
-            "new_risks_ytd":     all_new,
-            "new_risks_active":  active_new,
-            "escalating_ytd":    list(set(all_escalating)),
-            "diminishing_ytd":   all_diminishing,
-            "total_new":         len(all_new),
-            "total_active":      len(active_new),
-            "severity_map":      severity_map,
+            "year": year, "quarters_covered": quarters_covered,
+            "new_risks_ytd": all_new,
+            "new_risks_active": [r for r in all_new if r not in resolved],
+            "escalating_ytd": list(set(all_escalating)),
+            "diminishing_ytd": all_diminishing,
+            "total_new": len(all_new),
+            "total_active": len([r for r in all_new if r not in resolved]),
+            "severity_map": severity_map,
         }
+
+    def get_all_tickers(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT ticker FROM confidence_signals ORDER BY ticker"
+        ).fetchall()
+        return [r[0] for r in rows]
