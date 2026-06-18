@@ -1,23 +1,35 @@
-"""agents/base.py – Shared agent infrastructure: RAG retrieval + LLM reasoning."""
+"""agents/base.py – Shared agent infrastructure with retry and evidence formatting."""
 
 from __future__ import annotations
-import json, re
+import json, re, asyncio
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
+from tenacity import (
+    retry, stop_after_attempt, wait_exponential,
+    retry_if_exception_type, before_sleep_log
+)
+import logging
 
 from config import settings
 from store.vector_store import VectorStore
+
+# Exceptions worth retrying
+try:
+    import openai
+    _RETRY_EXC = (openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
+except ImportError:
+    _RETRY_EXC = (Exception,)
 
 
 class BaseAgent:
     """
     Base for all signal agents.
     Provides:
-      - rag_retrieve() → retrieve evidence from vector store
-      - llm_reason()   → structured JSON output from LLM
+      - rag_retrieve()  → retrieve evidence from vector store
+      - llm_reason()    → structured JSON output with automatic retry
     """
 
     def __init__(self, vector_store: VectorStore):
@@ -40,29 +52,30 @@ class BaseAgent:
         top_k_per_query: int = 8,
     ) -> list[tuple[Any, float]]:
         """
-        Multi-query RAG retrieval. Runs each query separately and deduplicates
-        by chunk_id, keeping highest relevance score per chunk.
+        Multi-query RAG retrieval. Deduplicates by chunk_id keeping
+        highest relevance score.
         """
         seen: dict[str, tuple[Any, float]] = {}
 
         for q in queries:
-            results = self.vs.retrieve(
-                query=q, ticker=ticker,
-                n_results=top_k_per_query,
-                quarter=quarter,
-                quarters=quarters,
-                doc_types=doc_types,
-                sections=sections,
-                management_only=management_only,
-            )
-            for chunk, score in results:
-                cid = chunk.chunk_id
-                if cid not in seen or score > seen[cid][1]:
-                    seen[cid] = (chunk, score)
+            try:
+                results = self.vs.retrieve(
+                    query=q, ticker=ticker,
+                    n_results=top_k_per_query,
+                    quarter=quarter,
+                    quarters=quarters,
+                    doc_types=doc_types,
+                    sections=sections,
+                    management_only=management_only,
+                )
+                for chunk, score in results:
+                    cid = chunk.chunk_id
+                    if cid not in seen or score > seen[cid][1]:
+                        seen[cid] = (chunk, score)
+            except Exception as e:
+                logger.warning(f"RAG query failed ('{q[:40]}'): {e}")
 
-        # Sort by relevance descending
-        merged = sorted(seen.values(), key=lambda x: x[1], reverse=True)
-        return merged
+        return sorted(seen.values(), key=lambda x: x[1], reverse=True)
 
     def format_evidence(
         self,
@@ -70,7 +83,7 @@ class BaseAgent:
         max_chunks: int = 12,
         include_metadata: bool = True,
     ) -> str:
-        """Format retrieved chunks into an evidence block for the LLM prompt."""
+        """Format retrieved chunks into a prompt evidence block."""
         lines = []
         for i, (chunk, score) in enumerate(chunks_and_scores[:max_chunks], 1):
             meta = ""
@@ -84,21 +97,32 @@ class BaseAgent:
         return "\n\n---\n\n".join(lines)
 
     async def llm_reason(self, system_prompt: str, user_prompt: str) -> dict:
-        """Call LLM and parse JSON response."""
-        resp = await self.llm.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ])
-        raw = resp.content.strip()
-        # Strip markdown fences
-        raw = re.sub(r"^```[a-z]*\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse failed: {e}. Attempting extraction…")
-            # Try to extract JSON object
-            m = re.search(r'\{.*\}', raw, re.DOTALL)
-            if m:
-                return json.loads(m.group())
-            raise
+        """
+        Call LLM with automatic retry on rate limits / timeouts.
+        Up to 3 attempts with exponential backoff (2s → 8s).
+        """
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=2, min=2, max=16),
+            retry=retry_if_exception_type(_RETRY_EXC),
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
+        async def _call():
+            resp = await self.llm.ainvoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt),
+            ])
+            raw = resp.content.strip()
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parse failed: {e}. Attempting extraction…")
+                m = re.search(r'\{.*\}', raw, re.DOTALL)
+                if m:
+                    return json.loads(m.group())
+                raise
+
+        return await _call()

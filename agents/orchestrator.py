@@ -6,8 +6,14 @@ Runs the full signal pipeline across three quarters in one shot:
   - QoQ     (prior quarter)
   - YoY     (same quarter, prior year)
 
-Exposes:
-  run_comparison_pipeline(ticker, company, quarter=None, year=None)
+Key reliability improvements over v1:
+  - Agents run SEQUENTIALLY within each quarter (prevents rate limit thundering herd)
+  - Quarters run with staggered starts (further reduces peak API concurrency)
+  - Each save call is isolated in try/except so one DuckDB failure
+    can't kill the remaining agents
+  - Per-quarter chunk count tracked; quarters with 0 chunks are skipped
+    (agents produce hallucinated signals with no RAG evidence)
+  - Granular error reporting per quarter + agent
 """
 
 from __future__ import annotations
@@ -43,13 +49,9 @@ def _yoy_quarter(q: str, yr: int) -> tuple[str, int]:
 
 
 def _latest_completed_quarter() -> tuple[str, int]:
-    """
-    Returns the most recently *completed* quarter based on today's date.
-    Assumes companies report ~6 weeks after quarter end, so we use
-    calendar quarter minus one as the safe default.
-    """
+    """Returns the most recently completed quarter (calendar Q minus one)."""
     now = datetime.utcnow()
-    current_q = (now.month - 1) // 3 + 1   # 1-4
+    current_q = (now.month - 1) // 3 + 1
     if current_q == 1:
         return "Q4", now.year - 1
     return f"Q{current_q - 1}", now.year
@@ -58,135 +60,206 @@ def _latest_completed_quarter() -> tuple[str, int]:
 def resolve_quarters(
     quarter: str | None = None,
     year: int | None = None,
-) -> tuple[tuple[str,int], tuple[str,int], tuple[str,int]]:
-    """
-    Returns (latest, qoq, yoy) quarter tuples.
-    If quarter/year not provided, auto-detects latest completed quarter.
-    """
+) -> tuple[tuple[str, int], tuple[str, int], tuple[str, int]]:
     if quarter and year:
         latest = (quarter, year)
     else:
         latest = _latest_completed_quarter()
-
-    qoq = _prior_quarter(*latest)
-    yoy = _yoy_quarter(*latest)
-    return latest, qoq, yoy
+    return latest, _prior_quarter(*latest), _yoy_quarter(*latest)
 
 
 # ── LangGraph state ───────────────────────────────────────────────────────────
 
 class ComparisonState(TypedDict):
-    ticker:       str
-    company:      str
-    latest_q:     str
-    latest_yr:    int
-    qoq_q:        str
-    qoq_yr:       int
-    yoy_q:        str
-    yoy_yr:       int
-    docs_ingested: int
-    chunks_stored: int
-    latest_bundle: Optional[dict]
-    qoq_bundle:    Optional[dict]
-    yoy_bundle:    Optional[dict]
-    errors:        Annotated[list[str], operator.add]
-    current_node:  str
+    ticker:          str
+    company:         str
+    latest_q:        str
+    latest_yr:       int
+    qoq_q:           str
+    qoq_yr:          int
+    yoy_q:           str
+    yoy_yr:          int
+    docs_ingested:   int
+    chunks_by_quarter: dict   # quarter_label → chunk_count
+    latest_bundle:   Optional[dict]
+    qoq_bundle:      Optional[dict]
+    yoy_bundle:      Optional[dict]
+    errors:          Annotated[list[str], operator.add]
+    current_node:    str
 
 
-# ── Ingest node: fetch + embed docs for all three quarters ────────────────────
+# ── Ingestion ─────────────────────────────────────────────────────────────────
+
+# Minimum chunks required to run agents for a quarter.
+# Below this threshold the RAG evidence is too thin to trust.
+MIN_CHUNKS_TO_SCORE = 5
+
 
 async def _ingest_quarter(
     ticker: str, company: str, quarter: str, year: int,
     vs: VectorStore, ss: SignalStore,
 ) -> tuple[int, int]:
-    """Fetch, chunk, embed documents for one quarter. Returns (docs, chunks)."""
+    """
+    Fetch + chunk + embed one quarter.
+    Returns (doc_count, chunk_count).
+    """
     try:
-        docs = await fetch_documents(ticker, company, quarter, year, include_prior=False)
+        docs = await fetch_documents(
+            ticker, company, quarter, year, include_prior=False
+        )
     except Exception as e:
-        logger.error(f"Fetch failed {quarter} {year}: {e}")
+        logger.error(f"[ingest] Fetch failed {quarter} {year}: {e}")
         return 0, 0
 
     total_chunks = 0
     for doc in docs:
-        chunks = chunk_document(doc)
-        n = vs.upsert_chunks(chunks)
-        total_chunks += n
-        ss.log_document(
-            ticker=doc.ticker, company=doc.company, doc_type=doc.doc_type.value,
-            quarter=doc.quarter, fiscal_year=doc.fiscal_year,
-            source_url=doc.source_url, title=doc.title,
-            chunk_count=n, doc_id=doc.doc_id,
-        )
+        try:
+            chunks = chunk_document(doc)
+            n = vs.upsert_chunks(chunks)
+            total_chunks += n
+            ss.log_document(
+                ticker=doc.ticker, company=doc.company,
+                doc_type=doc.doc_type.value,
+                quarter=doc.quarter, fiscal_year=doc.fiscal_year,
+                source_url=doc.source_url, title=doc.title,
+                chunk_count=n, doc_id=doc.doc_id,
+            )
+        except Exception as e:
+            logger.warning(f"[ingest] Chunk/embed failed for {doc.doc_id}: {e}")
+
+    logger.info(f"[ingest] {ticker} {quarter} {year}: {len(docs)} docs, {total_chunks} chunks")
     return len(docs), total_chunks
 
 
 async def ingest_all(state: ComparisonState, vs: VectorStore, ss: SignalStore) -> dict:
-    """Fetch and embed documents for latest, QoQ, and YoY quarters in parallel."""
+    """
+    Ingest all three quarters in parallel (I/O bound — safe to parallelise).
+    Tracks per-quarter chunk counts so agents can be skipped if empty.
+    """
     ticker, company = state["ticker"], state["company"]
-    logger.info(f"[ingest] Fetching 3 quarters for {ticker}: "
-                f"{state['latest_q']} {state['latest_yr']} / "
-                f"{state['qoq_q']} {state['qoq_yr']} / "
-                f"{state['yoy_q']} {state['yoy_yr']}")
+    quarters = [
+        (state["latest_q"], state["latest_yr"]),
+        (state["qoq_q"],    state["qoq_yr"]),
+        (state["yoy_q"],    state["yoy_yr"]),
+    ]
+    labels = [f"{q} {y}" for q, y in quarters]
+
+    logger.info(
+        f"[ingest] {ticker} → {labels[0]} | {labels[1]} | {labels[2]}"
+    )
 
     results = await asyncio.gather(
-        _ingest_quarter(ticker, company, state["latest_q"], state["latest_yr"], vs, ss),
-        _ingest_quarter(ticker, company, state["qoq_q"],    state["qoq_yr"],    vs, ss),
-        _ingest_quarter(ticker, company, state["yoy_q"],    state["yoy_yr"],    vs, ss),
+        *[_ingest_quarter(ticker, company, q, y, vs, ss) for q, y in quarters],
         return_exceptions=True,
     )
 
-    total_docs, total_chunks = 0, 0
-    errors = []
-    for r in results:
-        if isinstance(r, Exception):
-            errors.append(str(r))
-        else:
-            total_docs   += r[0]
-            total_chunks += r[1]
+    total_docs = 0
+    chunks_by_quarter: dict[str, int] = {}
+    errors: list[str] = []
 
-    logger.success(f"[ingest] {total_docs} docs → {total_chunks} chunks across 3 quarters")
+    for label, r in zip(labels, results):
+        if isinstance(r, Exception):
+            errors.append(f"ingest {label}: {r}")
+            chunks_by_quarter[label] = 0
+        else:
+            total_docs += r[0]
+            chunks_by_quarter[label] = r[1]
+
+    total_chunks = sum(chunks_by_quarter.values())
+
+    for label, count in chunks_by_quarter.items():
+        status = "✅" if count >= MIN_CHUNKS_TO_SCORE else "⚠️ too few"
+        logger.info(f"[ingest]   {label}: {count} chunks {status}")
+
+    logger.success(f"[ingest] Total: {total_docs} docs, {total_chunks} chunks")
     return {
-        "docs_ingested": total_docs,
-        "chunks_stored": total_chunks,
-        "current_node": "ingested",
-        "errors": errors,
+        "docs_ingested":    total_docs,
+        "chunks_by_quarter": chunks_by_quarter,
+        "current_node":     "ingested",
+        "errors":           errors,
     }
 
 
-# ── Signal node: run all four agents for one quarter ─────────────────────────
+# ── Signal execution ──────────────────────────────────────────────────────────
+
+async def _save_safe(save_fn, signal, label: str, errors: list) -> None:
+    """Wrap a save call so a DuckDB error doesn't kill sibling agents."""
+    try:
+        save_fn(signal)
+    except Exception as e:
+        msg = f"save {label}: {e}"
+        errors.append(msg)
+        logger.error(f"[signals] {msg}")
+
 
 async def _run_signals_for_quarter(
     ticker: str, company: str,
     quarter: str, year: int,
     prior_q: str,
     all_quarters: list[str],
-    vs: VectorStore, ss: SignalStore,
+    chunk_count: int,
+    vs: VectorStore,
+    ss: SignalStore,
 ) -> SignalBundle:
-    conf_agent = ConfidenceAgent(vs)
-    narr_agent = NarrativeAgent(vs)
-    guid_agent = GuidanceAgent(vs)
-    risk_agent = RiskAgent(vs)
+    """
+    Run all four signal agents for one quarter SEQUENTIALLY with small gaps.
+    Sequential execution prevents the rate-limit thundering herd that occurs
+    when 12 LLM calls fire simultaneously across 3 quarters.
+    """
+    errors: list[str] = []
+    label = f"{quarter} {year}"
 
-    results = await asyncio.gather(
-        conf_agent.run(ticker, company, quarter, year, prior_q),
-        narr_agent.run(ticker, company, quarter, year, prior_q),
-        guid_agent.run(ticker, company, quarter, year, all_quarters),
-        risk_agent.run(ticker, company, quarter, year, prior_q),
-        return_exceptions=True,
-    )
+    # Skip if too few chunks — agents would produce hallucinated signals
+    if chunk_count < MIN_CHUNKS_TO_SCORE:
+        msg = (
+            f"{label}: only {chunk_count} chunks found "
+            f"(need ≥{MIN_CHUNKS_TO_SCORE}). "
+            "Signals skipped — try running again or check Tavily results."
+        )
+        logger.warning(f"[signals] {msg}")
+        errors.append(msg)
+        return SignalBundle(
+            ticker=ticker, company=company,
+            quarter=quarter, fiscal_year=year,
+            errors=errors,
+        )
 
-    errors = []
+    logger.info(f"[signals] {ticker} {label}: running agents ({chunk_count} chunks available)")
+
     conf_sig = narr_sig = guid_sig = risk_sig = None
-    labels = ["confidence", "narrative", "guidance", "risk"]
-    for label, r in zip(labels, results):
-        if isinstance(r, Exception):
-            errors.append(f"{quarter} {year} {label}: {r}")
-            logger.error(f"[signals] {label} {quarter} {year}: {r}")
-        else:
-            if label == "confidence": conf_sig = r; ss.save_confidence(r)
-            elif label == "narrative": narr_sig = r; ss.save_narrative(r)
-            elif label == "guidance":  guid_sig = r; ss.save_guidance(r)
-            elif label == "risk":      risk_sig = r; ss.save_risk(r)
+    agent_defs = [
+        ("confidence", lambda: ConfidenceAgent(vs).run(ticker, company, quarter, year, prior_q)),
+        ("narrative",  lambda: NarrativeAgent(vs).run(ticker, company, quarter, year, prior_q)),
+        ("guidance",   lambda: GuidanceAgent(vs).run(ticker, company, quarter, year, all_quarters)),
+        ("risk",       lambda: RiskAgent(vs).run(ticker, company, quarter, year, prior_q)),
+    ]
+
+    for agent_name, agent_fn in agent_defs:
+        try:
+            result = await agent_fn()
+
+            if agent_name == "confidence":
+                conf_sig = result
+                await _save_safe(ss.save_confidence, result, f"{label}/confidence", errors)
+            elif agent_name == "narrative":
+                narr_sig = result
+                await _save_safe(ss.save_narrative, result, f"{label}/narrative", errors)
+            elif agent_name == "guidance":
+                guid_sig = result
+                await _save_safe(ss.save_guidance, result, f"{label}/guidance", errors)
+            elif agent_name == "risk":
+                risk_sig = result
+                await _save_safe(ss.save_risk, result, f"{label}/risk", errors)
+
+            logger.success(f"[signals] {ticker} {label}/{agent_name} ✅")
+
+        except Exception as e:
+            msg = f"{label}/{agent_name}: {e}"
+            errors.append(msg)
+            logger.error(f"[signals] ❌ {msg}")
+
+        # Small gap between agents to stay within rate limits
+        await asyncio.sleep(0.4)
 
     return SignalBundle(
         ticker=ticker, company=company,
@@ -198,56 +271,93 @@ async def _run_signals_for_quarter(
 
 
 async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalStore) -> dict:
-    """Run signal agents for all three quarters concurrently."""
+    """
+    Run signals for all three quarters with staggered starts.
+    Quarters are staggered (not fully parallel) to spread LLM load:
+      Latest starts immediately
+      QoQ starts after 1s
+      YoY starts after 2s
+    This keeps peak concurrent LLM calls at ~2–3 rather than 12.
+    """
     ticker, company = state["ticker"], state["company"]
-    all_quarters = [
-        state["latest_q"], state["qoq_q"], state["yoy_q"],
-    ]
+    chunks = state.get("chunks_by_quarter", {})
+    all_quarters = [state["latest_q"], state["qoq_q"], state["yoy_q"]]
 
-    logger.info(f"[signals] Running agents across 3 quarters for {ticker}")
-
-    latest_b, qoq_b, yoy_b = await asyncio.gather(
-        _run_signals_for_quarter(
+    async def _run_latest():
+        return await _run_signals_for_quarter(
             ticker, company,
             state["latest_q"], state["latest_yr"],
-            state["qoq_q"], all_quarters, vs, ss,
-        ),
-        _run_signals_for_quarter(
+            state["qoq_q"],
+            all_quarters,
+            chunks.get(f"{state['latest_q']} {state['latest_yr']}", 0),
+            vs, ss,
+        )
+
+    async def _run_qoq():
+        await asyncio.sleep(1.0)   # stagger start
+        return await _run_signals_for_quarter(
             ticker, company,
             state["qoq_q"], state["qoq_yr"],
             _prior_quarter(state["qoq_q"], state["qoq_yr"])[0],
-            all_quarters, vs, ss,
-        ),
-        _run_signals_for_quarter(
+            all_quarters,
+            chunks.get(f"{state['qoq_q']} {state['qoq_yr']}", 0),
+            vs, ss,
+        )
+
+    async def _run_yoy():
+        await asyncio.sleep(2.0)   # stagger start
+        return await _run_signals_for_quarter(
             ticker, company,
             state["yoy_q"], state["yoy_yr"],
             _prior_quarter(state["yoy_q"], state["yoy_yr"])[0],
-            all_quarters, vs, ss,
-        ),
+            all_quarters,
+            chunks.get(f"{state['yoy_q']} {state['yoy_yr']}", 0),
+            vs, ss,
+        )
+
+    logger.info(f"[signals] Running 3 quarters (staggered) for {ticker}")
+    latest_b, qoq_b, yoy_b = await asyncio.gather(
+        _run_latest(), _run_qoq(), _run_yoy(),
         return_exceptions=True,
     )
 
-    errors = []
-    def _safe_dump(b):
+    errors: list[str] = []
+
+    def _safe_dump(b, label: str) -> dict | None:
         if isinstance(b, Exception):
-            errors.append(str(b))
+            errors.append(f"{label}: {b}")
+            logger.error(f"[signals] Quarter {label} failed: {b}")
             return None
+        if b.errors:
+            errors.extend(b.errors)
         return b.model_dump(mode="json")
 
-    logger.success(f"[signals] All three quarters complete for {ticker}")
-    return {
-        "latest_bundle": _safe_dump(latest_b),
-        "qoq_bundle":    _safe_dump(qoq_b),
-        "yoy_bundle":    _safe_dump(yoy_b),
+    result = {
+        "latest_bundle": _safe_dump(latest_b, f"{state['latest_q']} {state['latest_yr']}"),
+        "qoq_bundle":    _safe_dump(qoq_b,    f"{state['qoq_q']} {state['qoq_yr']}"),
+        "yoy_bundle":    _safe_dump(yoy_b,     f"{state['yoy_q']} {state['yoy_yr']}"),
         "current_node":  "signals_done",
         "errors":        errors,
     }
 
+    completed = sum(1 for k in ["latest_bundle","qoq_bundle","yoy_bundle"] if result[k])
+    logger.success(f"[signals] {ticker}: {completed}/3 quarters completed")
+    return result
 
-# ── Graph builder ─────────────────────────────────────────────────────────────
 
-def _has_chunks(state: ComparisonState) -> str:
-    return "ok" if state.get("chunks_stored", 0) > 0 else "no_data"
+# ── Graph ─────────────────────────────────────────────────────────────────────
+
+def _has_any_chunks(state: ComparisonState) -> str:
+    """
+    Proceed if ANY quarter has enough chunks.
+    (Previous version required TOTAL > 0, which skipped all signals
+     if any one quarter failed ingestion.)
+    """
+    chunks = state.get("chunks_by_quarter", {})
+    if any(c >= MIN_CHUNKS_TO_SCORE for c in chunks.values()):
+        return "ok"
+    logger.warning("[graph] No quarter reached minimum chunk threshold — skipping signals")
+    return "no_data"
 
 
 def build_graph(vs: VectorStore, ss: SignalStore):
@@ -258,7 +368,9 @@ def build_graph(vs: VectorStore, ss: SignalStore):
     g.add_node("ingest",  _ingest)
     g.add_node("signals", _signals)
     g.add_edge(START, "ingest")
-    g.add_conditional_edges("ingest", _has_chunks, {"ok": "signals", "no_data": END})
+    g.add_conditional_edges(
+        "ingest", _has_any_chunks, {"ok": "signals", "no_data": END}
+    )
     g.add_edge("signals", END)
     return g.compile()
 
@@ -273,18 +385,13 @@ async def run_comparison_pipeline(
     vs: VectorStore | None = None,
     ss: SignalStore | None = None,
 ) -> dict:
-    """
-    Main entry point.
-    Returns dict with keys: latest, qoq, yoy → each a SignalBundle dict.
-    Also returns: latest_label, qoq_label, yoy_label for display.
-    """
     if vs is None: vs = VectorStore()
     if ss is None: ss = SignalStore()
 
     (lq, ly), (qq, qy), (yq, yy) = resolve_quarters(quarter, year)
 
     logger.info(
-        f"Comparison pipeline: {ticker} | "
+        f"Pipeline: {ticker} | "
         f"Latest={lq} {ly} | QoQ={qq} {qy} | YoY={yq} {yy}"
     )
 
@@ -296,13 +403,13 @@ async def run_comparison_pipeline(
         "latest_q": lq, "latest_yr": ly,
         "qoq_q":   qq, "qoq_yr":   qy,
         "yoy_q":   yq, "yoy_yr":   yy,
-        "docs_ingested": 0,
-        "chunks_stored": 0,
-        "latest_bundle": None,
-        "qoq_bundle":    None,
-        "yoy_bundle":    None,
-        "errors": [],
-        "current_node": "start",
+        "docs_ingested":    0,
+        "chunks_by_quarter": {},
+        "latest_bundle":    None,
+        "qoq_bundle":       None,
+        "yoy_bundle":       None,
+        "errors":           [],
+        "current_node":     "start",
     }
 
     final: dict[str, Any] = {}
@@ -311,12 +418,13 @@ async def run_comparison_pipeline(
         final.update(chunk[node])
 
     return {
-        "latest":       final.get("latest_bundle"),
-        "qoq":          final.get("qoq_bundle"),
-        "yoy":          final.get("yoy_bundle"),
-        "latest_label": f"{lq} {ly}",
-        "qoq_label":    f"{qq} {qy}",
-        "yoy_label":    f"{yq} {yy}",
+        "latest":        final.get("latest_bundle"),
+        "qoq":           final.get("qoq_bundle"),
+        "yoy":           final.get("yoy_bundle"),
+        "latest_label":  f"{lq} {ly}",
+        "qoq_label":     f"{qq} {qy}",
+        "yoy_label":     f"{yq} {yy}",
         "docs_ingested": final.get("docs_ingested", 0),
-        "errors":       final.get("errors", []),
+        "chunks_by_quarter": final.get("chunks_by_quarter", {}),
+        "errors":        final.get("errors", []),
     }
