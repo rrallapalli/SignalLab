@@ -430,10 +430,13 @@ with tab1:
     label_col, l_col, q_col, y_col = st.columns([1.4,1,1,1])
     with label_col: st.markdown("**Score**")
     with l_col:
+        st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#a78bfa;text-align:center'>📍 {label_l}</div>", unsafe_allow_html=True)
         st.markdown(_score_cell(l_score), unsafe_allow_html=True)
+        st.markdown("<div style='height:1.15rem'></div>", unsafe_allow_html=True)
         st.plotly_chart(_gauge(l_score, 10), use_container_width=True, key="chart_1")
     with q_col:
         if q_score:
+            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#67e8f9;text-align:center'>↔ {label_q}</div>", unsafe_allow_html=True)
             st.markdown(_score_cell(q_score), unsafe_allow_html=True)
             st.markdown(_delta_html(l_score, q_score), unsafe_allow_html=True)
             st.plotly_chart(_gauge(q_score, 10), use_container_width=True, key="chart_2")
@@ -441,6 +444,7 @@ with tab1:
             st.caption("No data")
     with y_col:
         if y_score:
+            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#86efac;text-align:center'>📅 {label_y}</div>", unsafe_allow_html=True)
             st.markdown(_score_cell(y_score), unsafe_allow_html=True)
             st.markdown(_delta_html(l_score, y_score), unsafe_allow_html=True)
             st.plotly_chart(_gauge(y_score, 10), use_container_width=True, key="chart_3")
@@ -697,16 +701,20 @@ with tab3:
     lbl_col, l_col, q_col, y_col = st.columns([1.4,1,1,1])
     with lbl_col: st.markdown("**Guidance Score**")
     with l_col:
+        st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#a78bfa;text-align:center'>📍 {label_l}</div>", unsafe_allow_html=True)
         st.markdown(_score_cell(l_gs, 100), unsafe_allow_html=True)
+        st.markdown("<div style='height:1.15rem'></div>", unsafe_allow_html=True)
         st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_4")
     with q_col:
         if q_gs:
+            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#67e8f9;text-align:center'>↔ {label_q}</div>", unsafe_allow_html=True)
             st.markdown(_score_cell(q_gs, 100), unsafe_allow_html=True)
             st.markdown(_delta_html(l_gs, q_gs), unsafe_allow_html=True)
-            st.plotly_chart(_gauge(q_gs, 100), use_container_width=True, key="chart_5")
+            st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_5")
         else: st.caption("No data")
     with y_col:
         if y_gs:
+            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#86efac;text-align:center'>📅 {label_y}</div>", unsafe_allow_html=True)
             st.markdown(_score_cell(y_gs, 100), unsafe_allow_html=True)
             st.markdown(_delta_html(l_gs, y_gs), unsafe_allow_html=True)
             st.plotly_chart(_gauge(y_gs, 100), use_container_width=True, key="chart_6")
@@ -737,7 +745,7 @@ with tab3:
                 st.markdown("&nbsp;→&nbsp;".join(cells), unsafe_allow_html=True)
             summary = gd.get("summary","")
             if summary:
-                st.markdown(f"<div class='signal-card'><p style='color:#e2e8f0;font-size:0.82rem;margin:0'>{summary[:200]}…</p></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='signal-card'><p style='color:#e2e8f0;font-size:0.85rem;margin:0;line-height:1.55'>{summary}</p></div>", unsafe_allow_html=True)
 
 
 # ── Tab 4: Risk Emergence ─────────────────────────────────────────────────────
@@ -845,7 +853,7 @@ with tab4:
             # Summary
             summary = rd.get("summary","")
             if summary:
-                st.markdown(f"<div style='color:#64748b;font-size:0.8rem;margin-top:0.5rem'>{summary[:180]}…</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='signal-card' style='border-left-color:#ef4444;margin-top:0.6rem'><p style='color:#e2e8f0;font-size:0.85rem;margin:0;line-height:1.55'>{summary}</p></div>", unsafe_allow_html=True)
 
 
 # ── Tab 5: Trend History ──────────────────────────────────────────────────────
