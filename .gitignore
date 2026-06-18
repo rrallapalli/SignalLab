@@ -17,3 +17,11 @@ __pycache__/
 
 # VS Code local settings
 .vscode/
+# Local data — never commit DB or vector store
+data/signals.duckdb
+data/chroma/
+data/*.log
+
+# Signal output JSONs
+*.json
+!.env.example
