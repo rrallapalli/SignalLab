@@ -5,7 +5,8 @@
 ## Prerequisites
 
 - Python **3.11** or **3.12**
-- Two API keys (see below)
+- One API key (OpenAI) — document ingestion from NSE/BSE needs no key
+- Network access to `nseindia.com` and `bseindia.com` (both are public but geo/rate sensitive; a VPN inside India can help if requests are being blocked)
 - ~500MB disk space for the virtual environment
 
 ---
@@ -49,14 +50,15 @@ This takes 2–3 minutes the first time.
 
 ---
 
-## Step 4 — Get your API keys
+## Step 4 — Get your API key
 
 **OpenAI** → [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - Create an account, add a payment method, generate a key
 - Recommended model: `gpt-4o-mini` (fast and cheap for development)
 
-**Tavily** → [app.tavily.com](https://app.tavily.com)
-- Free tier gives 1,000 searches/month — enough for testing
+No key is needed for document ingestion — NSE and BSE corporate-announcement
+filings (results, investor decks, concall transcripts, annual reports) are
+fetched directly and are public.
 
 ---
 
@@ -66,11 +68,10 @@ This takes 2–3 minutes the first time.
 cp .env.example .env
 ```
 
-Open `.env` and fill in your keys:
+Open `.env` and fill in your key:
 
 ```
 OPENAI_API_KEY=sk-...
-TAVILY_API_KEY=tvly-...
 ```
 
 Optional settings you can also add to `.env`:
@@ -97,20 +98,21 @@ This opens `http://localhost:8501` in your browser automatically.
 
 In the dashboard sidebar:
 
-1. Enter a **ticker** — e.g. `MSFT`
-2. Enter the **company name** — e.g. `Microsoft Corporation`
+1. Enter a **ticker** — the NSE trading symbol, e.g. `TCS`, `INFY`, `RELIANCE`, `HDFCBANK`
+2. Enter the **company name** — e.g. `Tata Consultancy Services` (used to resolve the matching BSE scrip code)
 3. Leave **Quarter** set to `Auto` — the system detects the latest completed quarter and automatically runs **Latest + QoQ + YoY** in one shot
 4. Select a model — `gpt-4o-mini` is recommended for first runs
 5. Click **🚀 Run Analysis**
 
 The pipeline will:
-- Search for earnings transcripts, press releases, investor presentations and news via Tavily
+- Pull corporate-announcement filings (results, investor presentations, concall transcripts, annual reports) directly from NSE and BSE for the relevant date windows
+- Download and extract text from each PDF attachment
 - Chunk and embed all documents into ChromaDB
 - Run four signal agents (Confidence, Narrative, Guidance, Risk) across three quarters
 - Save all results to a local DuckDB database
 - Display the full dashboard automatically
 
-**Good tickers to start with:** `MSFT`, `AAPL`, `NVDA`, `GOOGL`, `INFY`, `TCS`
+**Good tickers to start with:** `TCS`, `INFY`, `RELIANCE`, `HDFCBANK`, `ICICIBANK`
 
 ---
 
@@ -140,13 +142,13 @@ If sections appear blank or show "No data" for some periods, run the diagnostic 
 python diagnose_db.py
 
 # Focus on one ticker
-python diagnose_db.py --ticker AAPL
+python diagnose_db.py --ticker TCS
 ```
 
 This shows a grid of which signals (Confidence / Narrative / Guidance / Risk) are stored for each quarter:
 
 ```
-AAPL
+TCS
   Q1 2026   Conf:✅  Narr:✅  Guid:✅  Risk:✅
   Q4 2025   Conf:✅  Narr:❌  Guid:✅  Risk:✅
   Q1 2025   Conf:❌  Narr:❌  Guid:❌  Risk:❌
@@ -206,12 +208,15 @@ pip install duckdb==1.0.0 --force-reinstall
 ```
 
 **Pipeline fails with "Pipeline failed" in the dashboard**
-- Check that both API keys in `.env` are valid
+- Check that `OPENAI_API_KEY` in `.env` is valid
+- Confirm the ticker is a real NSE symbol and that this machine can reach `nseindia.com` and `bseindia.com` (some cloud/CI networks block these)
 - Try switching to `gpt-4o-mini` in the model selector — it has higher rate limits
 - Check `data/signal_agent.log` for detailed error messages
 
-**No transcripts found for a ticker**
-Tavily's coverage of smaller or international companies can be limited. The system works best with large-cap stocks that have extensive public earnings call coverage (MSFT, AAPL, NVDA, GOOGL, INFY, TCS, ASML, etc.).
+**No documents found for a ticker**
+- Double check the NSE symbol spelling and that the company name closely matches its official listed name (used to resolve the BSE scrip code)
+- Smaller/thinly-covered companies may not publish concall transcripts as a formal filing — investor presentations and financial-results filings are usually still available
+- Widen `NSE_BSE_RESULT_LAG_DAYS` in `.env` if results were declared later than usual that quarter
 
 **Sub-dimension scores showing `—`**
 The data exists but sub-dimensions were not scored in that run. Re-run the pipeline for that ticker — the fixed pipeline will populate all six sub-dimensions.

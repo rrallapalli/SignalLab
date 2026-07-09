@@ -24,6 +24,30 @@ except ImportError:
     _RETRY_EXC = (Exception,)
 
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """
+    dict.get(key, default) only falls back when the key is ABSENT — if the
+    LLM returns the key with an explicit `null`, .get() still returns None
+    and float(None) raises. Use this instead of float(data.get(...)).
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """Same null-safety as safe_float(), for integer fields."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class BaseAgent:
     """
     Base for all signal agents.
@@ -38,6 +62,11 @@ class BaseAgent:
             model=settings.OPENAI_MODEL,
             temperature=settings.OPENAI_TEMPERATURE,
             api_key=settings.OPENAI_API_KEY,
+            # Forces the API itself to guarantee syntactically valid JSON output,
+            # instead of relying on the model voluntarily following "return only
+            # JSON" prompt instructions (which occasionally breaks on embedded
+            # quotes/apostrophes in quoted evidence text).
+            model_kwargs={"response_format": {"type": "json_object"}},
         )
 
     def rag_retrieve(
@@ -119,10 +148,20 @@ class BaseAgent:
             try:
                 return json.loads(raw)
             except json.JSONDecodeError as e:
-                logger.warning(f"JSON parse failed: {e}. Attempting extraction…")
-                m = re.search(r'\{.*\}', raw, re.DOTALL)
+                logger.warning(f"JSON parse failed: {e}. Attempting repair…")
+                candidate = raw
+                m = re.search(r'\{.*\}', candidate, re.DOTALL)
                 if m:
-                    return json.loads(m.group())
-                raise
+                    candidate = m.group()
+                # Common LLM JSON mistakes that json.loads() rejects outright:
+                candidate = candidate.replace("\u201c", '"').replace("\u201d", '"')  # smart double quotes
+                candidate = candidate.replace("\u2018", "'").replace("\u2019", "'")  # smart single quotes
+                candidate = re.sub(r",\s*([}\]])", r"\1", candidate)                # trailing commas
+                candidate = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", candidate)   # stray control chars
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    logger.error(f"JSON repair did not fix the payload; raw response head: {raw[:300]!r}")
+                    raise
 
         return await _call()

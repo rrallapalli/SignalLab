@@ -2,9 +2,13 @@
 main.py – CLI entry point.
 
 Usage:
-  python main.py run --ticker ASML --company "ASML Holding" --quarter Q2 --year 2024
+  python main.py run --ticker TCS --company "Tata Consultancy Services" --quarter Q2 --year 2024
   python main.py api        # start FastAPI server
   python main.py dashboard  # launch Streamlit
+
+`--ticker` is the NSE trading symbol (e.g. TCS, INFY, RELIANCE, HDFCBANK).
+Documents are pulled directly from NSE and BSE corporate-announcement
+filings — no API key is required for ingestion.
 """
 
 from __future__ import annotations
@@ -31,7 +35,6 @@ logger.add(lambda msg: console.print(f"[dim]{msg}[/dim]") if "DEBUG" not in msg 
 def _check_config():
     missing = []
     if not settings.OPENAI_API_KEY:  missing.append("OPENAI_API_KEY")
-    if not settings.TAVILY_API_KEY:  missing.append("TAVILY_API_KEY")
     if missing:
         console.print(f"[red]❌ Missing API keys: {', '.join(missing)}[/red]")
         console.print("[yellow]Copy .env.example → .env and fill in your keys.[/yellow]")
@@ -145,8 +148,8 @@ Commands:
   dashboard   Launch the Streamlit UI
 
 Examples:
-  python main.py run --ticker ASML --company "ASML Holding" --quarter Q2 --year 2024
-  python main.py run --ticker MSFT --company "Microsoft" --quarter Q1 --year 2025
+  python main.py run --ticker TCS --company "Tata Consultancy Services" --quarter Q2 --year 2024
+  python main.py run --ticker INFY --company "Infosys" --quarter Q1 --year 2025
   python main.py dashboard
   python main.py api
         """

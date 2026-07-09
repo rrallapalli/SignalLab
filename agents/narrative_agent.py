@@ -3,56 +3,333 @@ agents/narrative_agent.py
 RAG → LLM → NarrativeSignal: theme-level QoQ shift detection.
 
 Evidence retrieved across BOTH quarters to compare theme emphasis.
+
+Theme tracking is market-aware (India macro themes apply to every company)
+and sector-aware (a bank talks about NIMs and asset quality; an IT services
+firm talks about deal TCV and attrition; a generic US-tech theme list like
+"AI/ML, Cloud, China export controls" fits neither well). The sector is
+auto-detected from the company name / ticker unless explicitly passed in.
 """
 
 from __future__ import annotations
 
 from loguru import logger
 from models import Citation, NarrativeSignal, ThemeSignal, ThemeStatus
-from agents.base import BaseAgent
+from agents.base import BaseAgent, safe_float, safe_int
 from store.vector_store import VectorStore
 
 
-SYSTEM_PROMPT = """You are an equity research analyst detecting narrative shifts in management commentary.
+# -- India-wide macro themes -- tracked for every company regardless of sector
+MARKET_THEMES: list[str] = [
+    "RBI Monetary Policy / Repo Rate",
+    "Inflation (CPI/WPI)",
+    "INR Depreciation / Currency Impact",
+    "Monsoon & Rural Demand",
+    "Government Capex / Union Budget Policy",
+    "GST / Tax Policy Changes",
+    "FII/DII Flows",
+    "Election / Policy Uncertainty",
+    "Global Macro Spillover (US Fed, China slowdown)",
+    "Capital Allocation (buyback / dividend / M&A)",
+]
+
+BASE_QUERIES: list[str] = [
+    "demand growth outlook strategy",
+    "margins costs pricing power",
+    "risk regulatory competition",
+    "capital allocation buyback dividend M&A",
+    "interest rates inflation currency macro environment",
+    "monsoon rural urban demand government policy budget",
+]
+
+# -- Sector taxonomy: label, tracked themes, and extra targeted RAG queries --
+SECTOR_TAXONOMY: dict[str, dict] = {
+    "banking_nbfc": {
+        "label": "Banking / NBFC / Financial Services",
+        "match": [
+            "bank", "banking", "finance", "financial services", "nbfc", "housing finance",
+            "hdfc", "icici", "kotak", "axis", "sbi", "bajaj finance", "bajaj finserv",
+            "chola", "cholamandalam", "shriram", "muthoot", "mannapuram", "pnb", "canara",
+            "indusind", "yes bank", "idfc", "au small finance", "bandhan",
+        ],
+        "themes": [
+            "Net Interest Margin (NIM) / Spread Compression",
+            "Asset Quality / NPAs (GNPA, NNPA)",
+            "Credit Growth / Loan Book Growth",
+            "CASA Ratio / Deposit Mobilization & Cost",
+            "Provisioning / Credit Costs",
+            "RBI Regulatory Action / Compliance",
+            "Digital Lending / Fintech Competition",
+            "Capital Adequacy (CAR)",
+            "Unsecured Lending Risk",
+        ],
+        "queries": [
+            "net interest margin NIM spread deposit cost",
+            "asset quality NPA gross net slippages provisioning",
+            "loan book credit growth disbursement CASA",
+            "RBI regulatory guideline compliance capital adequacy",
+        ],
+    },
+    "it_services": {
+        "label": "IT Services / Technology",
+        "match": [
+            "infosys", "tcs", "tata consultancy", "wipro", "hcl", "tech mahindra",
+            "ltimindtree", "mindtree", "mphasis", "persistent", "coforge", "cyient",
+            "technologies", "information technology", "it services", "software",
+        ],
+        "themes": [
+            "Deal Wins / TCV (Total Contract Value)",
+            "Discretionary IT Spend",
+            "Client Budget Cuts / Furloughs",
+            "Attrition / Talent Costs",
+            "GenAI Adoption & Deal Cannibalization",
+            "Cloud & Digital Transformation",
+            "USD-INR Currency Impact",
+            "Vertical Demand (BFSI, Retail, Healthcare clients)",
+            "Utilization / Margin Levers",
+        ],
+        "queries": [
+            "deal wins TCV total contract value pipeline",
+            "discretionary spend client budget furlough",
+            "attrition talent cost utilization margin",
+            "GenAI artificial intelligence cannibalization cloud digital",
+        ],
+    },
+    "pharma_healthcare": {
+        "label": "Pharmaceuticals / Healthcare",
+        "match": [
+            "pharma", "pharmaceutical", "labs", "laboratories", "healthcare", "sun pharma",
+            "cipla", "dr reddy", "divi's", "divis", "lupin", "aurobindo", "biocon", "hospital",
+            "torrent pharma", "zydus", "apollo hospitals", "fortis",
+        ],
+        "themes": [
+            "US Generics Pricing Pressure",
+            "USFDA Inspections / Compliance",
+            "R&D Pipeline / New Launches",
+            "Domestic Formulations Growth",
+            "API / Raw Material Costs",
+            "Patent Cliffs / Para IV Litigation",
+            "Biosimilars",
+        ],
+        "queries": [
+            "US generics pricing pressure launches",
+            "USFDA inspection warning letter compliance plant",
+            "R&D pipeline ANDA approval patent litigation",
+            "domestic formulations India business growth",
+        ],
+    },
+    "fmcg_consumer": {
+        "label": "FMCG / Consumer",
+        "match": [
+            "hindustan unilever", "hul", "itc", "nestle", "britannia", "dabur", "marico",
+            "godrej consumer", "colgate", "tata consumer", "varun beverages", "united spirits",
+            "consumer goods", "fmcg",
+        ],
+        "themes": [
+            "Rural Demand Recovery",
+            "Urban Consumption Trends",
+            "Input Cost Inflation (palm oil, crude derivatives)",
+            "Volume Growth vs Price-led Growth",
+            "Distribution Expansion (GT / MT / E-commerce / Quick Commerce)",
+            "Premiumization",
+        ],
+        "queries": [
+            "rural urban demand recovery consumption",
+            "input cost inflation raw material palm oil",
+            "volume growth price led growth premiumization",
+            "distribution general trade modern trade e-commerce quick commerce",
+        ],
+    },
+    "auto_ancillary": {
+        "label": "Auto / Auto Ancillaries",
+        "match": [
+            "maruti", "tata motors", "mahindra", "bajaj auto", "hero motocorp", "eicher",
+            "tvs motor", "ashok leyland", "motherson", "bosch", "exide", "amara raja",
+            "motors", "automobile", "auto ancillary",
+        ],
+        "themes": [
+            "EV Transition / EV Mix",
+            "Semiconductor Availability",
+            "Rural vs Urban Demand",
+            "Commodity Costs (steel, aluminum)",
+            "Export Demand",
+            "Two-Wheeler vs PV vs CV Cycle",
+        ],
+        "queries": [
+            "EV electric vehicle mix transition launch",
+            "semiconductor chip shortage availability",
+            "rural urban demand two wheeler passenger vehicle",
+            "commodity cost steel aluminum export demand",
+        ],
+    },
+    "metals_cement": {
+        "label": "Metals, Mining & Cement",
+        "match": [
+            "tata steel", "jsw steel", "hindalco", "vedanta", "sail", "nmdc", "coal india",
+            "ultratech", "ambuja", "acc", "shree cement", "jk cement", "steel", "cement", "mining",
+        ],
+        "themes": [
+            "Commodity Price Cycle",
+            "China Demand / Overcapacity",
+            "Input Cost (coking coal, iron ore, pet coke)",
+            "Capacity Utilization",
+            "Infrastructure / Construction Demand",
+            "Realizations vs Volumes",
+        ],
+        "queries": [
+            "commodity price realization volume cycle",
+            "China demand overcapacity export",
+            "input cost coking coal iron ore capacity utilization",
+            "infrastructure construction demand capex",
+        ],
+    },
+    "energy_power": {
+        "label": "Energy / Oil & Gas / Power",
+        "match": [
+            "reliance industries", "ongc", "oil india", "bpcl", "hpcl", "iocl", "gail",
+            "ntpc", "power grid", "tata power", "adani power", "adani green", "adani energy",
+            "jsw energy", "power", "energy", "oil", "gas", "refinery",
+        ],
+        "themes": [
+            "Crude Oil Price Volatility",
+            "Refining Margins (GRM)",
+            "Renewable Energy Transition",
+            "Power Demand Growth",
+            "Regulatory / Tariff Changes",
+            "Green Energy Capex",
+        ],
+        "queries": [
+            "crude oil price refining margin GRM",
+            "renewable solar wind energy transition capex",
+            "power demand growth tariff regulatory",
+            "green energy capex investment",
+        ],
+    },
+    "telecom": {
+        "label": "Telecom",
+        "match": ["bharti airtel", "reliance jio", "vodafone idea", "vi ", "telecom", "airtel"],
+        "themes": [
+            "ARPU Growth",
+            "Subscriber Additions / Churn",
+            "5G Rollout & Capex",
+            "Tariff Hikes",
+            "AGR Dues / Regulatory",
+        ],
+        "queries": [
+            "ARPU subscriber growth churn 5G",
+            "tariff hike capex rollout",
+            "AGR dues regulatory spectrum",
+        ],
+    },
+    "infra_capital_goods": {
+        "label": "Infrastructure / Capital Goods",
+        "match": [
+            "larsen", "l&t", "adani ports", "adani enterprises", "irb infra", "gmr",
+            "siemens", "abb india", "cummins india", "bhel", "capital goods", "infrastructure",
+            "engineering construction",
+        ],
+        "themes": [
+            "Order Book / Order Inflow",
+            "Execution Pace / Project Delays",
+            "Government Capex (roads, railways, defense)",
+            "Working Capital Cycle",
+            "Raw Material Cost Pass-through",
+        ],
+        "queries": [
+            "order book order inflow execution pace",
+            "government capex roads railways defense infrastructure",
+            "working capital raw material cost pass through",
+        ],
+    },
+    "real_estate": {
+        "label": "Real Estate",
+        "match": ["dlf", "godrej properties", "oberoi realty", "prestige estates", "sobha", "real estate", "realty"],
+        "themes": [
+            "Pre-sales / Bookings",
+            "Inventory Levels",
+            "Launch Pipeline",
+            "Housing Demand / Affordability",
+            "Land Acquisition",
+        ],
+        "queries": [
+            "pre-sales bookings launch pipeline",
+            "inventory levels housing demand affordability",
+            "land acquisition project execution",
+        ],
+    },
+}
+
+DEFAULT_SECTOR = "general"
+GENERAL_THEMES = [
+    "Demand Environment", "Pricing Power", "Margins", "Competition",
+    "Capacity / Capex Plans", "Cost Inflation", "Regulatory Risk", "Innovation / New Products",
+]
+
+
+def _infer_sector(company: str, ticker: str) -> str:
+    """Best-effort keyword match against company name / ticker. Falls back to 'general'."""
+    text = f"{company} {ticker}".lower()
+    for sector_key, meta in SECTOR_TAXONOMY.items():
+        if any(kw in text for kw in meta["match"]):
+            return sector_key
+    return DEFAULT_SECTOR
+
+
+def _theme_list_for(sector_key: str) -> list[str]:
+    sector_themes = SECTOR_TAXONOMY.get(sector_key, {}).get("themes", GENERAL_THEMES)
+    return sector_themes + MARKET_THEMES
+
+
+def _queries_for(sector_key: str) -> list[str]:
+    sector_queries = SECTOR_TAXONOMY.get(sector_key, {}).get("queries", [])
+    return BASE_QUERIES + sector_queries
+
+
+def _build_system_prompt(sector_key: str) -> str:
+    sector_label = SECTOR_TAXONOMY.get(sector_key, {}).get("label", "General / Diversified")
+    themes = _theme_list_for(sector_key)
+    theme_block = "\n".join(f"- {t}" for t in themes)
+
+    return f"""You are an equity research analyst detecting narrative shifts in management commentary
+for an India-listed company in the **{sector_label}** sector.
 
 You will receive evidence chunks from the CURRENT quarter and the PRIOR quarter.
 Your task is to identify how management's narrative around key themes has CHANGED.
 
-Track these themes (and any others you observe):
-AI/ML, Cloud, Pricing Power, Margins, China, Competition, Hiring/Headcount,
-Regulatory Risk, Supply Chain, Consumer Demand, Innovation/R&D,
-Capital Allocation, Macro Environment, Cost Cutting, ESG/Sustainability,
-Interest Rates, Geopolitics, M&A, Digital Transformation.
+Track these themes (sector-specific themes first, India-wide macro themes always apply),
+and any others you observe that are clearly material to this company:
+
+{theme_block}
 
 For each theme:
 - Count evidence mentions in current vs prior quarter
-- Score sentiment (–1.0 to +1.0)
+- Score sentiment (-1.0 to +1.0)
 - Classify status: accelerating | emerging | stable | fading | newly_risky | resolved
 - Write one-line interpretation
 
 Return ONLY valid JSON:
-{
+{{
   "themes": [
-    {
-      "theme": "AI demand",
-      "status": "accelerating",
-      "evidence_count_current": 18,
-      "evidence_count_previous": 9,
-      "count_change": 9,
-      "sentiment_current": 0.85,
-      "sentiment_previous": 0.70,
-      "sentiment_change": 0.15,
-      "interpretation": "AI-related demand discussion doubled QoQ; management now citing AI as primary growth driver vs secondary tailwind last quarter.",
-      "key_quotes": ["We are seeing extraordinary demand for our AI products", "AI is becoming the primary lens through which customers evaluate our platform"]
-    }
+    {{
+      "theme": "Net Interest Margin (NIM) / Spread Compression",
+      "status": "newly_risky",
+      "evidence_count_current": 12,
+      "evidence_count_previous": 4,
+      "count_change": 8,
+      "sentiment_current": -0.4,
+      "sentiment_previous": 0.1,
+      "sentiment_change": -0.5,
+      "interpretation": "Management flagged NIM compression from deposit repricing for the first time this quarter, versus a confident tone last quarter.",
+      "key_quotes": ["We expect some NIM pressure as deposit costs catch up", "Margins should stabilize in the back half of the year"]
+    }}
   ],
-  "accelerating": ["AI demand", "Cloud"],
-  "emerging": ["Sovereign AI", "Edge computing"],
-  "fading": ["Supply chain disruptions", "Cost optimization"],
-  "newly_risky": ["China export controls"],
-  "overall_shift": "positive",
-  "shift_summary": "Narrative has shifted decisively toward AI-led growth while legacy cost pressures are fading. China remains a wildcard with newly material export control risk."
-}
+  "accelerating": ["Credit Growth / Loan Book Growth"],
+  "emerging": ["Digital Lending / Fintech Competition"],
+  "fading": ["Provisioning / Credit Costs"],
+  "newly_risky": ["Net Interest Margin (NIM) / Spread Compression"],
+  "overall_shift": "mixed",
+  "shift_summary": "Growth narrative remains intact but margin commentary turned cautious for the first time in several quarters, with deposit cost pressure now explicitly flagged as a near-term headwind."
+}}
 
 Status rules:
 - accelerating: >50% more mentions AND positive sentiment
@@ -66,17 +343,6 @@ Status rules:
 
 class NarrativeAgent(BaseAgent):
 
-    EVIDENCE_QUERIES = [
-        "AI cloud demand growth strategy",
-        "China macro geopolitics pricing competition",
-        "margins costs headcount hiring",
-        "risk supply chain regulatory",
-        "innovation product pipeline R&D",
-        "customer demand consumer spend",
-        "interest rates inflation macro environment",
-        "capital allocation buyback dividend M&A",
-    ]
-
     def __init__(self, vs: VectorStore):
         super().__init__(vs)
 
@@ -85,23 +351,28 @@ class NarrativeAgent(BaseAgent):
         ticker: str, company: str,
         quarter: str, fiscal_year: int,
         prior_quarter: str,
+        sector: str | None = None,
     ) -> NarrativeSignal:
-        logger.info(f"[NarrativeAgent] Running for {ticker} {quarter} {fiscal_year}")
+        sector_key = sector if sector in SECTOR_TAXONOMY else _infer_sector(company, ticker)
+        sector_label = SECTOR_TAXONOMY.get(sector_key, {}).get("label", "General / Diversified")
+        logger.info(f"[NarrativeAgent] Running for {ticker} {quarter} {fiscal_year} (sector={sector_label})")
+
+        queries = _queries_for(sector_key)
 
         current_chunks = self.rag_retrieve(
-            queries=self.EVIDENCE_QUERIES, ticker=ticker, quarter=quarter,
+            queries=queries, ticker=ticker, quarter=quarter,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             top_k_per_query=5,
         )
         prior_chunks = self.rag_retrieve(
-            queries=self.EVIDENCE_QUERIES, ticker=ticker, quarter=prior_quarter,
+            queries=queries, ticker=ticker, quarter=prior_quarter,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             top_k_per_query=5,
         )
 
         citations = self.vs.as_citations(current_chunks[:8])
 
-        user_prompt = f"""Company: {company} ({ticker})
+        user_prompt = f"""Company: {company} ({ticker})  |  Sector: {sector_label}
 Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter}
 
 === CURRENT QUARTER EVIDENCE ===
@@ -115,36 +386,36 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
 """
 
         try:
-            data = await self.llm_reason(SYSTEM_PROMPT, user_prompt)
+            data = await self.llm_reason(_build_system_prompt(sector_key), user_prompt)
 
             themes = []
             for t in data.get("themes", []):
-                status_str = t.get("status","stable")
+                status_str = t.get("status") or "stable"
                 try: status = ThemeStatus(status_str)
                 except: status = ThemeStatus.STABLE
                 themes.append(ThemeSignal(
-                    theme=t.get("theme",""),
+                    theme=t.get("theme","") or "",
                     status=status,
-                    evidence_count_current=int(t.get("evidence_count_current",0)),
-                    evidence_count_previous=int(t.get("evidence_count_previous",0)),
-                    count_change=int(t.get("count_change",0)),
-                    sentiment_current=float(t.get("sentiment_current",0.0)),
-                    sentiment_previous=float(t.get("sentiment_previous",0.0)),
-                    sentiment_change=float(t.get("sentiment_change",0.0)),
-                    interpretation=t.get("interpretation",""),
-                    key_quotes=t.get("key_quotes",[])[:2],
+                    evidence_count_current=safe_int(t.get("evidence_count_current")),
+                    evidence_count_previous=safe_int(t.get("evidence_count_previous")),
+                    count_change=safe_int(t.get("count_change")),
+                    sentiment_current=safe_float(t.get("sentiment_current")),
+                    sentiment_previous=safe_float(t.get("sentiment_previous")),
+                    sentiment_change=safe_float(t.get("sentiment_change")),
+                    interpretation=t.get("interpretation","") or "",
+                    key_quotes=(t.get("key_quotes") or [])[:2],
                 ))
 
             return NarrativeSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
                 themes=themes,
-                accelerating=data.get("accelerating",[]),
-                emerging=data.get("emerging",[]),
-                fading=data.get("fading",[]),
-                newly_risky=data.get("newly_risky",[]),
-                overall_shift=data.get("overall_shift","neutral"),
-                shift_summary=data.get("shift_summary",""),
+                accelerating=data.get("accelerating") or [],
+                emerging=data.get("emerging") or [],
+                fading=data.get("fading") or [],
+                newly_risky=data.get("newly_risky") or [],
+                overall_shift=data.get("overall_shift") or "neutral",
+                shift_summary=data.get("shift_summary") or "",
                 citations=citations,
             )
         except Exception as e:

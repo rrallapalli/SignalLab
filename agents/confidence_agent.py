@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from loguru import logger
 from models import Citation, ConfidenceSignal
-from agents.base import BaseAgent
+from agents.base import BaseAgent, safe_float
 from store.vector_store import VectorStore
 
 
@@ -123,18 +123,18 @@ Extract specific language changes that drove any score movement.
             return ConfidenceSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
-                score=float(data.get("score", 5.0)),
-                previous_score=data.get("previous_score"),
-                change=data.get("change"),
-                confidence_level=float(data.get("confidence_level", 5.0)),
-                uncertainty_level=float(data.get("uncertainty_level", 5.0)),
-                defensiveness=float(data.get("defensiveness", 5.0)),
-                specificity=float(data.get("specificity", 5.0)),
-                consistency=float(data.get("consistency", 5.0)),
-                forward_strength=float(data.get("forward_strength", 5.0)),
-                tone=data.get("tone", "neutral"),
-                drivers=data.get("drivers", []),
-                summary=data.get("summary", ""),
+                score=safe_float(data.get("score"), 5.0),
+                previous_score=safe_float(data["previous_score"]) if data.get("previous_score") is not None else None,
+                change=safe_float(data["change"]) if data.get("change") is not None else None,
+                confidence_level=safe_float(data.get("confidence_level"), 5.0),
+                uncertainty_level=safe_float(data.get("uncertainty_level"), 5.0),
+                defensiveness=safe_float(data.get("defensiveness"), 5.0),
+                specificity=safe_float(data.get("specificity"), 5.0),
+                consistency=safe_float(data.get("consistency"), 5.0),
+                forward_strength=safe_float(data.get("forward_strength"), 5.0),
+                tone=data.get("tone") or "neutral",
+                drivers=data.get("drivers") or [],
+                summary=data.get("summary") or "",
                 citations=citations,
             )
         except Exception as e:

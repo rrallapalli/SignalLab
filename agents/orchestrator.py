@@ -215,7 +215,8 @@ async def _run_signals_for_quarter(
         msg = (
             f"{label}: only {chunk_count} chunks found "
             f"(need ≥{MIN_CHUNKS_TO_SCORE}). "
-            "Signals skipped — try running again or check Tavily results."
+            "Signals skipped — try running again, or check that the NSE symbol / BSE "
+            "scrip code are correct and this machine can reach nseindia.com and bseindia.com."
         )
         logger.warning(f"[signals] {msg}")
         errors.append(msg)

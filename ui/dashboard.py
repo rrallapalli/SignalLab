@@ -27,41 +27,117 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  [data-testid="stSidebar"] { background:#0f0f1a; }
+  :root {
+    --bg-app:      #0b0e17;
+    --bg-panel:    #141a2e;
+    --bg-card:     #171d33;
+    --bg-card-alt: #10162a;
+    --border:      #2a3252;
+    --text-hi:     #f1f5f9;
+    --text-mid:    #cbd5e1;
+    --text-low:    #8b95b3;
+    --text-faint:  #4b5573;
+    --accent:      #6366f1;
+    --accent-soft: #4338ca;
+    --good:        #34d399;
+    --warn:        #fbbf24;
+    --bad-soft:    #fb923c;
+    --bad:         #f87171;
+  }
+
+  /* Streamlit fades elements to ~60-70% opacity while a script rerun is in
+     flight (its built-in "stale content" indicator). Combined with a dark
+     custom theme this reads as permanently washed-out, low-contrast text —
+     so we force full opacity everywhere and rely on our own spinners/status
+     messages to communicate "in progress" instead. */
+  [data-stale="true"], .element-container.stale-element {
+    opacity: 1 !important;
+  }
+
+  [data-testid="stSidebar"] {
+    background: var(--bg-panel);
+    overflow-y: auto;
+    max-height: 100vh;
+  }
+  [data-testid="stSidebarContent"] { overflow: visible; padding-bottom: 2rem; }
+  [data-testid="stAppViewContainer"] > .main { background: var(--bg-app); }
+
+  /* Explicit high-contrast text colors for the sidebar — don't rely on
+     Streamlit's default theme, which is tuned for a light background and
+     looks washed out against ours. Deliberately scoped to labels/headers/
+     captions that sit directly on the dark sidebar background — NOT to
+     input/select internals, which already render dark-text-on-white and
+     would become unreadable under a blanket white-text rule. */
+  [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+  [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label {
+    color: var(--text-hi) !important; opacity: 1 !important;
+  }
+  [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+  [data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
+    color: var(--text-low) !important; opacity: 1 !important;
+  }
+  [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+    color: var(--text-hi) !important;
+  }
+  [data-testid="stSidebar"] [data-testid="stTooltipIcon"] svg { opacity: 0.85 !important; }
+  [data-testid="stSidebar"] hr { border-color: var(--border) !important; opacity: 1 !important; }
+
   .col-header {
     text-align:center; font-size:0.78rem; font-weight:700;
-    letter-spacing:0.08em; text-transform:uppercase;
-    padding:0.4rem 0; border-radius:6px; margin-bottom:0.6rem;
+    letter-spacing:0.06em; text-transform:uppercase;
+    padding:0.55rem 0; border-radius:8px; margin-bottom:0.5rem;
+    border:1px solid var(--border);
   }
-  .col-latest  { background:#1a1040; color:#c4b5fd; }
-  .col-qoq     { background:#0c1a1a; color:#67e8f9; }
-  .col-yoy     { background:#0c1a0c; color:#86efac; }
-  .score-big   { font-size:2.4rem; font-weight:800; text-align:center; }
-  .delta-up    { color:#22c55e; font-size:1rem; font-weight:700; text-align:center; }
-  .delta-down  { color:#ef4444; font-size:1rem; font-weight:700; text-align:center; }
-  .delta-flat  { color:#94a3b8; font-size:1rem; font-weight:700; text-align:center; }
+  .col-latest  { background:#241a4d; color:#c7b8ff; border-color:#3d2d7a; }
+  .col-qoq     { background:#0d2530; color:#7dd3e8; border-color:#1c4a5a; }
+  .col-yoy     { background:#0f2818; color:#8fe0ac; border-color:#20502e; }
+
+  .score-big   { font-size:2.3rem; font-weight:800; text-align:center; letter-spacing:-0.02em; }
+  .delta-up    { color:var(--good); font-size:0.95rem; font-weight:700; text-align:center; }
+  .delta-down  { color:var(--bad);  font-size:0.95rem; font-weight:700; text-align:center; }
+  .delta-flat  { color:var(--text-low); font-size:0.95rem; font-weight:700; text-align:center; }
+
   .signal-card {
-    background:#1e1e2e; border-radius:10px;
+    background: var(--bg-card); border-radius:12px;
     padding:1rem 1.2rem; margin-bottom:0.8rem;
-    border-left:4px solid #7c3aed;
+    border:1px solid var(--border); border-left:4px solid var(--accent);
   }
   .driver-item {
-    padding:0.5rem 0.7rem; background:#12121f; border-radius:7px;
-    border-left:3px solid #7c3aed; margin:0.35rem 0; color:#e2e8f0; font-size:0.87rem;
+    padding:0.55rem 0.8rem; background: var(--bg-card-alt); border-radius:8px;
+    border:1px solid var(--border); border-left:3px solid var(--accent);
+    margin:0.35rem 0; color: var(--text-mid); font-size:0.87rem;
   }
   .risk-card {
-    background:#1e1e2e; border-radius:8px; padding:0.8rem 1rem;
-    margin:0.4rem 0; border-left:3px solid #ef4444;
+    background: var(--bg-card); border-radius:10px; padding:0.8rem 1rem;
+    margin:0.4rem 0; border:1px solid var(--border); border-left:3px solid var(--bad);
   }
   .status-pill {
-    display:inline-block; padding:0.15rem 0.6rem; border-radius:999px;
-    font-size:0.75rem; font-weight:700;
+    display:inline-block; padding:0.18rem 0.65rem; border-radius:999px;
+    font-size:0.74rem; font-weight:700; letter-spacing:0.01em;
   }
-  .pill-green  { background:#14532d; color:#4ade80; }
-  .pill-red    { background:#450a0a; color:#f87171; }
-  .pill-yellow { background:#422006; color:#fbbf24; }
-  .pill-purple { background:#2e1065; color:#c4b5fd; }
-  .pill-orange { background:#431407; color:#fb923c; }
+  .pill-green  { background:#0f3d2c; color:#5eead4; }
+  .pill-red    { background:#431515; color:#fca5a5; }
+  .pill-yellow { background:#3a2a05; color:#fcd34d; }
+  .pill-purple { background:#2a1f5c; color:#c4b5fd; }
+  .pill-orange { background:#3d1f0a; color:#fdba74; }
+
+  /* Explanatory captions under section headers */
+  .section-help {
+    color: var(--text-low); font-size:0.83rem; line-height:1.5;
+    margin: -0.3rem 0 0.9rem 0; padding: 0.5rem 0.8rem;
+    background: var(--bg-card-alt); border-radius:8px; border:1px solid var(--border);
+  }
+
+  /* Inline "ⓘ" hover tooltip — no JS needed, uses the title attribute */
+  .info-tip {
+    cursor: help; color: var(--text-low); font-size:0.82rem;
+    border-bottom: 1px dotted var(--text-faint);
+  }
+
+  /* Small colour-coded legend chips explaining the gauge thresholds */
+  .legend-row { display:flex; gap:1.1rem; flex-wrap:wrap; font-size:0.78rem; color: var(--text-low); margin: 0.2rem 0 0.8rem 0; }
+  .legend-dot { display:inline-block; width:0.55rem; height:0.55rem; border-radius:50%; margin-right:0.35rem; vertical-align:middle; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -95,7 +171,7 @@ vs, ss = _stores()
 
 def _color(score: float, max_val: float = 10) -> str:
     p = score / max_val
-    return "#22c55e" if p >= 0.75 else "#eab308" if p >= 0.55 else "#f97316" if p >= 0.35 else "#ef4444"
+    return "#34d399" if p >= 0.75 else "#fbbf24" if p >= 0.55 else "#fb923c" if p >= 0.35 else "#f87171"
 
 
 def _delta_html(current: float, reference: float, invert: bool = False) -> str:
@@ -116,6 +192,18 @@ def _score_cell(score: float | None, max_val: float = 10) -> str:
 
 def _pill(text: str, cls: str) -> str:
     return f"<span class='status-pill {cls}'>{text}</span>"
+
+
+def _score_legend(max_val: float = 10) -> None:
+    """Small colour-coded legend explaining what the gauge colours mean."""
+    st.markdown(f"""
+    <div class='legend-row'>
+      <span><span class='legend-dot' style='background:#34d399'></span>Strong (≥{max_val*0.75:.0f})</span>
+      <span><span class='legend-dot' style='background:#fbbf24'></span>Moderate (≥{max_val*0.55:.0f})</span>
+      <span><span class='legend-dot' style='background:#fb923c'></span>Weak (≥{max_val*0.35:.0f})</span>
+      <span><span class='legend-dot' style='background:#f87171'></span>Poor (&lt;{max_val*0.35:.0f})</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ── Citation renderer ─────────────────────────────────────────────────────────
@@ -240,19 +328,45 @@ def _trend_chart(history: list[dict], col: str, color: str = "#7c3aed",
 
 with st.sidebar:
     st.markdown("## 📡 Signal Intelligence")
-    st.caption("Latest · QoQ · YoY comparison")
+    st.caption("AI-powered equity signal engine for India-listed companies")
     st.divider()
 
-    st.markdown("### Run Analysis")
-    ticker_in  = st.text_input("Ticker", placeholder="INFY, TCS, MSFT…", max_chars=10).upper().strip()
-    company_in = st.text_input("Company name", placeholder="Infosys Limited")
+    stored = ss.get_all_tickers()
+    if stored:
+        st.markdown("### Stored Tickers")
+        view_ticker = st.selectbox(
+            "Load", ["— choose —"] + stored,
+            help="Reload a previously-run ticker from the local database without re-running the pipeline.",
+        )
+        st.divider()
+    else:
+        view_ticker = "— choose —"
 
-    st.markdown("**Quarter** *(optional — leave blank for auto-detect)*")
+    st.markdown("### Run Analysis")
+    ticker_in  = st.text_input(
+        "Ticker", placeholder="INFY, TCS, MSFT…", max_chars=10,
+        help="The NSE trading symbol for the company (e.g. TCS, INFY, RELIANCE). "
+             "Documents are fetched directly from NSE and BSE using this symbol.",
+    ).upper().strip()
+    company_in = st.text_input(
+        "Company name", placeholder="Infosys Limited",
+        help="Full legal/listed name — used to resolve the matching BSE scrip code. "
+             "Closer to the official listed name = more reliable match.",
+    )
+
     col_q, col_y = st.columns(2)
     with col_q:
-        quarter_in = st.selectbox("Q", ["Auto", "Q1","Q2","Q3","Q4"], index=0, label_visibility="collapsed")
+        quarter_in = st.selectbox(
+            "Quarter", ["Auto", "Q1","Q2","Q3","Q4"], index=0,
+            help="Leave on Auto to analyze the most recently completed quarter. "
+                 "Pick a specific quarter to anchor the analysis to an earlier period instead.",
+        )
     with col_y:
-        year_in = st.number_input("Year", min_value=2019, max_value=2030, value=2024, step=1)
+        from datetime import datetime as _dt_year
+        year_in = st.number_input(
+            "Year", min_value=2019, max_value=2030, value=_dt_year.now().year, step=1,
+            help="Only used when Quarter is set to a specific value (ignored on Auto).",
+        )
 
     quarter_val = None if quarter_in == "Auto" else quarter_in
     year_val    = None if quarter_in == "Auto" else int(year_in)
@@ -262,16 +376,17 @@ with st.sidebar:
         auto_q, auto_yr = _latest_completed_quarter()
         st.caption(f"Auto-detect: **{auto_q} {auto_yr}** as latest")
 
-    model_choice = st.selectbox("Model", ["gpt-4o-mini","gpt-4o"], index=0)
+    model_choice = st.selectbox(
+        "Model", ["gpt-4o-mini","gpt-4o"], index=0,
+        help="gpt-4o-mini is faster and cheaper — good for most runs. "
+             "gpt-4o gives higher-quality reasoning but costs more per run.",
+    )
     run_disabled = not (ticker_in and company_in)
     run_btn = st.button("🚀 Run Analysis", type="primary", use_container_width=True,
-                        disabled=run_disabled)
-
-    st.divider()
-    st.markdown("### Stored Tickers")
-    stored = ss.get_all_tickers()
-    view_ticker = st.selectbox("Load", ["— choose —"] + stored) if stored else "— choose —"
-    if not stored: st.caption("No signals stored yet.")
+                        disabled=run_disabled,
+                        help="Fetches NSE/BSE documents and runs all four signal agents "
+                             "for Latest, QoQ, and YoY in one click." if not run_disabled
+                             else "Enter both a Ticker and Company name to enable this.")
 
 
 # ════════════════════════════════════════════════════════════
@@ -316,7 +431,11 @@ if run_btn:
         progress.empty()
         status_box.update(label="❌ Pipeline failed", state="error", expanded=True)
         st.error(f"**Error:** {e}")
-        st.info("Check your `.env` has valid `OPENAI_API_KEY` and `TAVILY_API_KEY`.")
+        st.info(
+            "Check your `.env` has a valid `OPENAI_API_KEY`, that the ticker is a valid "
+            "NSE symbol (e.g. TCS, INFY, RELIANCE), and that this machine can reach "
+            "nseindia.com / bseindia.com."
+        )
         st.stop()
 
 
@@ -337,6 +456,16 @@ else:
 if not active_ticker:
     st.markdown("""
     ## Welcome to Signal Intelligence
+
+    **An AI-powered signal intelligence platform for India-listed equities.**
+    Signal Intelligence turns raw corporate disclosures — quarterly results, investor
+    presentations, and concall transcripts, pulled directly from NSE and BSE — into
+    structured, evidence-backed investment signals. A multi-agent RAG pipeline reads
+    the filings so you don't have to: it scores management's tone and confidence,
+    tracks how the narrative around key sector themes is shifting quarter over quarter,
+    audits whether guidance is actually being delivered on, and surfaces emerging risks
+    before they show up in the price. Every signal is cited back to the source document —
+    this is decision-grade evidence synthesis, not another LLM summary of a transcript.
 
     Enter a ticker in the sidebar and click **Run Analysis**.
 
@@ -475,6 +604,15 @@ with c1: st.markdown(f"<div class='col-header col-latest'>📍 Latest<br>{label_
 with c2: st.markdown(f"<div class='col-header col-qoq'>↔ QoQ vs<br>{label_q}</div>", unsafe_allow_html=True)
 with c3: st.markdown(f"<div class='col-header col-yoy'>📅 YoY vs<br>{label_y}</div>", unsafe_allow_html=True)
 
+st.markdown(
+    "<div class='section-help'>"
+    "<b>Latest</b> = most recently completed quarter &nbsp;·&nbsp; "
+    "<b>QoQ</b> = prior quarter, shows short-term momentum &nbsp;·&nbsp; "
+    "<b>YoY</b> = same quarter last year, shows structural change beneath the seasonal noise."
+    "</div>",
+    unsafe_allow_html=True,
+)
+
 st.divider()
 
 # ── Data coverage banner ──────────────────────────────────────────────────────
@@ -519,6 +657,16 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 # ── Tab 1: Management Confidence ──────────────────────────────────────────────
 
 with tab1:
+
+    st.markdown(
+        "<div class='section-help'>"
+        "Scores management's tone in prepared remarks and Q&A on a 0–10 scale — "
+        "higher means more confident, specific, and consistent language, and less hedging or defensiveness. "
+        "Compare the three columns to see whether tone is improving or deteriorating."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _score_legend(10)
 
     # Helper to extract confidence data from either bundle dict or DB row
     def _conf(b):
@@ -674,6 +822,15 @@ with tab1:
 
 with tab2:
 
+    st.markdown(
+        "<div class='section-help'>"
+        "Tracks how much management emphasizes each theme (AI, margins, China, competition, etc.) "
+        "and whether that emphasis is growing, fading, or newly risky, compared to the prior quarter. "
+        "<b>Overall Shift</b> summarizes the net direction: positive, negative, mixed, or neutral."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
     def _narr(b):
         if b is None: return {}
         n = b.get("narrative") if isinstance(b, dict) and "narrative" in b else b
@@ -757,6 +914,15 @@ with tab2:
 # ── Tab 3: Guidance Credibility ───────────────────────────────────────────────
 
 with tab3:
+
+    st.markdown(
+        "<div class='section-help'>"
+        "Scores how reliably management delivers on its own guidance, on a 0–100 scale. "
+        "Compares guidance given in past quarters against the actual results reported later, "
+        "and flags a company as <b>serial-miss risk</b> if it has repeatedly missed its own targets."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     # ── YTD Guidance callout ──────────────────────────────────────────────────
     from datetime import datetime as _dt
@@ -868,6 +1034,15 @@ with tab3:
 # ── Tab 4: Risk Emergence ─────────────────────────────────────────────────────
 
 with tab4:
+
+    st.markdown(
+        "<div class='section-help'>"
+        "Detects risks that became newly material or escalated between quarters, by comparing how often "
+        "and how seriously they're discussed. Severity runs low → medium → high → critical; "
+        "status shows whether a risk is new, escalating, stable, diminishing, or resolved."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     # ── YTD Risk callout ──────────────────────────────────────────────────────
     from datetime import datetime as _dt2
@@ -983,6 +1158,13 @@ with tab5:
         st.info("Run the pipeline for additional quarters to see trend data.")
     else:
         st.markdown("### Signal Trends — Full History")
+        st.markdown(
+            "<div class='section-help'>"
+            "Every stored quarter for this ticker, plotted in order — useful for spotting a multi-quarter "
+            "trend that a single QoQ/YoY snapshot could miss."
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         t1, t2 = st.columns(2)
         with t1:

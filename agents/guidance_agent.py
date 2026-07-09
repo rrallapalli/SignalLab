@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from loguru import logger
 from models import Citation, GuidanceItem, GuidanceSignal
-from agents.base import BaseAgent
+from agents.base import BaseAgent, safe_float, safe_int
 from store.vector_store import VectorStore
 
 
@@ -116,29 +116,29 @@ Score guidance credibility based on the full history available.
             items = []
             for g in data.get("guidance_items", []):
                 items.append(GuidanceItem(
-                    metric=g.get("metric",""),
-                    period=g.get("period",""),
-                    guided_in=g.get("guided_in",""),
-                    guidance=g.get("guidance",""),
+                    metric=g.get("metric","") or "",
+                    period=g.get("period","") or "",
+                    guided_in=g.get("guided_in","") or "",
+                    guidance=g.get("guidance","") or "",
                     actual=g.get("actual"),
-                    outcome=g.get("outcome",""),
-                    miss_reason=g.get("miss_reason",""),
+                    outcome=g.get("outcome","") or "",
+                    miss_reason=g.get("miss_reason","") or "",
                 ))
 
             return GuidanceSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
-                score=float(data.get("score", 50)),
+                score=safe_float(data.get("score"), 50.0),
                 guidance_items=items,
-                periods_tracked=int(data.get("periods_tracked", 0)),
-                beats=int(data.get("beats", 0)),
-                misses=int(data.get("misses", 0)),
-                in_line=int(data.get("in_line", 0)),
-                withdrawals=int(data.get("withdrawals", 0)),
-                beat_rate=float(data.get("beat_rate", 0.5)),
-                serial_miss_risk=bool(data.get("serial_miss_risk", False)),
-                recent_pattern=data.get("recent_pattern", []),
-                summary=data.get("summary", ""),
+                periods_tracked=safe_int(data.get("periods_tracked")),
+                beats=safe_int(data.get("beats")),
+                misses=safe_int(data.get("misses")),
+                in_line=safe_int(data.get("in_line")),
+                withdrawals=safe_int(data.get("withdrawals")),
+                beat_rate=safe_float(data.get("beat_rate"), 0.5),
+                serial_miss_risk=bool(data.get("serial_miss_risk") or False),
+                recent_pattern=data.get("recent_pattern") or [],
+                summary=data.get("summary") or "",
                 citations=citations,
             )
         except Exception as e:

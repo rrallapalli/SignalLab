@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from loguru import logger
 from models import Citation, RiskItem, RiskSeverity, RiskSignal, RiskStatus
-from agents.base import BaseAgent
+from agents.base import BaseAgent, safe_int
 from store.vector_store import VectorStore
 
 
@@ -118,29 +118,29 @@ Count mentions and assess severity. Focus on material changes.
 
             risks = []
             for r in data.get("risks", []):
-                try: status = RiskStatus(r.get("status","stable"))
+                try: status = RiskStatus(r.get("status") or "stable")
                 except: status = RiskStatus.STABLE
-                try: severity = RiskSeverity(r.get("severity","medium"))
+                try: severity = RiskSeverity(r.get("severity") or "medium")
                 except: severity = RiskSeverity.MEDIUM
                 risks.append(RiskItem(
-                    risk=r.get("risk",""),
+                    risk=r.get("risk","") or "",
                     status=status, severity=severity,
-                    mention_count_current=int(r.get("mention_count_current",0)),
-                    mention_count_previous=int(r.get("mention_count_previous",0)),
-                    count_change=int(r.get("count_change",0)),
-                    evidence=r.get("evidence",""),
-                    key_quotes=r.get("key_quotes",[])[:2],
+                    mention_count_current=safe_int(r.get("mention_count_current")),
+                    mention_count_previous=safe_int(r.get("mention_count_previous")),
+                    count_change=safe_int(r.get("count_change")),
+                    evidence=r.get("evidence","") or "",
+                    key_quotes=(r.get("key_quotes") or [])[:2],
                 ))
 
             return RiskSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
                 risks=risks,
-                new_risks=data.get("new_risks",[]),
-                escalating=data.get("escalating",[]),
-                diminishing=data.get("diminishing",[]),
-                overall_risk_direction=data.get("overall_risk_direction","stable"),
-                summary=data.get("summary",""),
+                new_risks=data.get("new_risks") or [],
+                escalating=data.get("escalating") or [],
+                diminishing=data.get("diminishing") or [],
+                overall_risk_direction=data.get("overall_risk_direction") or "stable",
+                summary=data.get("summary") or "",
                 citations=citations,
             )
         except Exception as e:

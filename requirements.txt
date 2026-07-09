@@ -15,8 +15,9 @@ chromadb>=0.5.0
 # Structured signal storage
 duckdb>=1.0.0
 
-# Document fetching & parsing
-tavily-python>=0.3.0
+# Document fetching & parsing (NSE/BSE India direct — no API key needed)
+nse>=3.1.0
+bse>=3.3.0
 httpx>=0.27.0
 beautifulsoup4>=4.12.0
 pypdf>=4.2.0

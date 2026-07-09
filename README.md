@@ -10,7 +10,7 @@ RAG is the **evidence layer**. The product is **structured signals** — not tra
 
 ## What it does
 
-Signal Intelligence ingests earnings call transcripts, press releases, investor presentations, and news articles for a given stock ticker, then runs four specialised LLM agents over the retrieved evidence to produce structured, time-series-tracked signals across three time horizons automatically:
+Signal Intelligence ingests earnings call transcripts, press releases, investor presentations, and annual reports **filed directly on NSE and BSE** for a given India-listed stock, then runs four specialised LLM agents over the retrieved evidence to produce structured, time-series-tracked signals across three time horizons automatically:
 
 | Horizon | What it represents |
 |---------|-------------------|
@@ -27,15 +27,15 @@ Scores management tone across six sub-dimensions: confidence level, uncertainty,
 
 ```json
 {
-  "company": "ASML",
+  "company": "Tata Consultancy Services",
   "quarter": "Q2 2024",
   "score": 6.4,
   "previous_score": 7.8,
   "change": -1.4,
   "tone": "cautious",
   "drivers": [
-    "Cautious language on China demand — 'monitoring closely' replaced prior 'strong growth'",
-    "Guidance range widened from $500M to $800M band",
+    "Cautious language on discretionary IT spend — 'monitoring closely' replaced prior 'strong growth'",
+    "Deal-pipeline commentary softened versus last quarter's investor call",
     "CEO used 'challenging' 4× this quarter vs 1× last quarter"
   ]
 }
@@ -85,7 +85,10 @@ Detects newly material or escalating risks by comparing mention counts and conte
 ## How it works
 
 ```
-Tavily search (earnings calls · press releases · investor days · news)
+NSE + BSE corporate announcements (results · investor decks · concall transcripts · annual reports)
+        │
+        ▼
+Download PDF attachments  →  extract text
         │
         ▼
 Chunk + tag  →  ChromaDB
@@ -119,7 +122,7 @@ SignalLab/
 ├── .env.example
 │
 ├── ingestion/
-│   ├── fetcher.py              Tavily parallel search + HTML fetching
+│   ├── fetcher.py              NSE + BSE corporate-announcement fetch + PDF text extraction
 │   └── chunker.py              Sentence-boundary chunker with metadata tagging
 │
 ├── store/
@@ -148,7 +151,7 @@ SignalLab/
 | Component | Technology |
 |-----------|-----------|
 | Agent orchestration | LangGraph |
-| Document search | Tavily API |
+| Document fetch | NSE + BSE direct corporate-announcement APIs |
 | Embeddings | OpenAI `text-embedding-3-small` |
 | Vector store | ChromaDB (local persistent) |
 | Signal storage | DuckDB (local) |
@@ -163,7 +166,8 @@ SignalLab/
 | Key | Where to get it | Free tier |
 |-----|----------------|-----------|
 | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | No — pay per use |
-| `TAVILY_API_KEY` | [app.tavily.com](https://app.tavily.com) | Yes — 1,000 searches/month |
+
+Document ingestion needs **no API key** — NSE and BSE corporate-announcement filings are public. You do need network access to `nseindia.com` and `bseindia.com` from wherever the pipeline runs.
 
 **Estimated cost per ticker run:** ~$0.05–0.15 with `gpt-4o-mini` · ~$0.40–1.00 with `gpt-4o`
 

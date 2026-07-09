@@ -1,159 +1,306 @@
-"""ingestion/fetcher.py – Discover and fetch source documents via Tavily."""
+"""
+ingestion/fetcher.py – Discover and fetch source documents directly from
+NSE (National Stock Exchange of India) and BSE (Bombay Stock Exchange).
+
+Replaces the earlier Tavily-based web search. Indian-listed companies file
+earnings-related disclosures — financial results, investor/analyst
+presentations, transcripts of concalls, press releases, annual reports —
+as PDF attachments to exchange corporate-announcement filings. Both
+exchanges expose these publicly with no API key required:
+
+  NSE  -> nseindia.com corporate-announcements endpoint (via the `nse` pkg)
+  BSE  -> bseindia.com corporate-announcements endpoint (via the `bse` pkg)
+
+`ticker` is expected to be the NSE trading symbol (e.g. "TCS", "INFY",
+"RELIANCE", "HDFCBANK"). The matching BSE scrip code is resolved
+automatically from the company name, but can be overridden with
+`bse_scripcode=` if auto-lookup picks the wrong listing.
+"""
 
 from __future__ import annotations
-import asyncio, hashlib, re
-from datetime import datetime
+
+import asyncio
+import hashlib
+import io
+from datetime import datetime, timedelta
+from typing import Optional
 
 import httpx
-from bs4 import BeautifulSoup
-from tavily import TavilyClient
+from dateutil import parser as dtparser
 from loguru import logger
+from pypdf import PdfReader
+
+from bse import BSE
+from nse import NSE
 
 from config import settings
 from models import DocumentType, SourceDocument
 
-QUERIES: dict[str, list[str]] = {
-    "earnings_call": [
-        "{company} {quarter} {year} earnings call transcript",
-        "{ticker} Q{q} {year} earnings call transcript CEO CFO full",
-        "{company} {quarter} {year} quarterly results transcript seekingalpha",
-    ],
-    "annual_report": [
-        "{company} {year} annual report 10-K highlights CEO letter",
-    ],
-    "investor_presentation": [
-        "{company} {quarter} {year} investor day presentation slides",
-        "{ticker} {year} capital markets day analyst day",
-    ],
-    "press_release": [
-        "{company} {quarter} {year} earnings press release financial results",
-        "{ticker} {quarter} {year} quarterly earnings announcement",
-    ],
-    "news_article": [
-        "{company} {quarter} {year} earnings analysis commentary reaction",
-        "{ticker} Q{q} {year} management guidance analyst notes",
-    ],
-}
-
-TRANSCRIPT_SOURCES = [
-    "seekingalpha.com", "motleyfool.com", "fool.com", "rev.com",
-    "stockanalysis.com", "finance.yahoo.com", "businesswire.com", "prnewswire.com",
+# ── Which announcement subjects map to which document type ──────────────────
+# Order matters: first match wins.
+SUBJECT_KEYWORDS: list[tuple[DocumentType, tuple[str, ...]]] = [
+    (DocumentType.EARNINGS_CALL, (
+        "transcript", "con call", "concall", "conference call", "earnings call",
+    )),
+    (DocumentType.INVESTOR_PRESENTATION, (
+        "investor presentation", "analyst presentation", "investor/analyst presentation",
+        "investor call presentation", "earnings presentation",
+    )),
+    (DocumentType.ANNUAL_REPORT, (
+        "annual report",
+    )),
+    (DocumentType.PRESS_RELEASE, (
+        "financial results", "un-audited financial", "unaudited financial",
+        "audited financial", "results for the quarter", "outcome of board meeting",
+        "press release", "financial result",
+    )),
+    (DocumentType.MANAGEMENT_COMMENTARY, (
+        "credit rating", "clarification", "newspaper publication",
+        "intimation", "outcome of the meeting",
+    )),
 ]
+
+# Only these doc types have a real chance of being found on the exchanges.
+DEFAULT_DOC_TYPES = ["earnings_call", "press_release", "investor_presentation", "annual_report"]
+
+BSE_ATTACHMENT_BASES = (
+    "https://www.bseindia.com/xml-data/corpfiling/AttachLive/",
+    "https://www.bseindia.com/xml-data/corpfiling/AttachHis/",
+)
 
 
 def _doc_id(ticker: str, doc_type: str, quarter: str, url: str) -> str:
     return hashlib.md5(f"{ticker}::{doc_type}::{quarter}::{url}".encode()).hexdigest()[:16]
 
 
-def _guess_quarter(text: str, fallback_q: str = "Q1", fallback_yr: int = 2024) -> tuple[str, int]:
-    m = re.search(r'(Q[1-4])\s*(20\d{2})', text, re.I)
-    if m: return m.group(1).upper(), int(m.group(2))
-    m = re.search(r'(20\d{2})\s*(Q[1-4])', text, re.I)
-    if m: return m.group(2).upper(), int(m.group(1))
-    return fallback_q, fallback_yr
+def _classify(subject: str, allowed: set[str]) -> Optional[DocumentType]:
+    s = subject.lower()
+    for dtype, patterns in SUBJECT_KEYWORDS:
+        if dtype.value not in allowed:
+            continue
+        if any(p in s for p in patterns):
+            return dtype
+    return None
 
 
-async def _fetch_html(url: str) -> str:
+def _quarter_bounds(quarter: str, year: int) -> tuple[datetime, datetime]:
+    """Calendar-quarter bounds, e.g. Q2 2024 -> (Apr 1 2024, Jun 30 2024)."""
+    q = int(quarter[1])
+    start_month = (q - 1) * 3 + 1
+    start = datetime(year, start_month, 1)
+    end_month, end_year = start_month + 2, year
+    if end_month == 12:
+        end = datetime(end_year, 12, 31, 23, 59, 59)
+    else:
+        end = datetime(end_year, end_month + 1, 1) - timedelta(seconds=1)
+    return start, end
+
+
+def _search_window(quarter: str, year: int, doc_types: set[str]) -> tuple[datetime, datetime]:
+    start, q_end = _quarter_bounds(quarter, year)
+    lag = settings.NSE_BSE_ANNUAL_LAG_DAYS if "annual_report" in doc_types else settings.NSE_BSE_RESULT_LAG_DAYS
+    end = min(q_end + timedelta(days=lag), datetime.utcnow())
+    if end < start:
+        end = start
+    return start, end
+
+
+async def _fetch_nse(nse: NSE, ticker: str, start: datetime, end: datetime) -> list[dict]:
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            if resp.status_code != 200: return ""
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for tag in soup(["script","style","nav","header","footer","aside"]): tag.decompose()
-            return soup.get_text(separator="\n", strip=True)
+        anns = await asyncio.to_thread(nse.announcements, symbol=ticker, from_date=start, to_date=end)
+        return anns or []
     except Exception as e:
-        logger.debug(f"Fetch failed {url}: {e}")
-        return ""
-
-
-async def _search(tavily: TavilyClient, query: str) -> list[dict]:
-    try:
-        r = await asyncio.to_thread(
-            tavily.search, query=query, max_results=settings.TOP_K_RETRIEVAL,
-            search_depth="advanced", include_raw_content=True,
-        )
-        return r.get("results", [])
-    except Exception as e:
-        logger.warning(f"Search failed '{query[:50]}': {e}")
+        logger.warning(f"NSE announcements failed for {ticker}: {e}")
         return []
 
 
-def _infer_doc_type(text: str, url: str) -> DocumentType:
-    body = text.lower()
-    if "transcript" in body or "earnings call" in body: return DocumentType.EARNINGS_CALL
-    if "prnewswire" in url or "businesswire" in url or "press release" in body: return DocumentType.PRESS_RELEASE
-    if "investor day" in body or "analyst day" in body or "capital markets day" in body: return DocumentType.INVESTOR_PRESENTATION
-    if "annual report" in body or "10-k" in body: return DocumentType.ANNUAL_REPORT
-    return DocumentType.NEWS_ARTICLE
+async def _fetch_bse(bse: BSE, scripcode: str, start: datetime, end: datetime) -> list[dict]:
+    rows: list[dict] = []
+    page = 1
+    total_pages = 1
+    try:
+        while page <= total_pages and page <= settings.NSE_BSE_MAX_PAGES:
+            data = await asyncio.to_thread(
+                bse.announcements, page_no=page, from_date=start, to_date=end, scripcode=str(scripcode),
+            )
+            batch = (data or {}).get("Table") or []
+            if not batch:
+                break
+            total_pages = batch[0].get("TotalPageCnt") or 1
+            rows.extend(batch)
+            page += 1
+    except Exception as e:
+        logger.warning(f"BSE announcements failed for scripcode {scripcode}: {e}")
+    return rows
+
+
+def _nse_pdf_url(item: dict) -> str:
+    return item.get("attchmntFile", "") or ""
+
+
+def _nse_subject(item: dict) -> str:
+    return f"{item.get('desc','')} {item.get('attchmntText','')}".strip()
+
+
+def _nse_event_date(item: dict) -> Optional[datetime]:
+    try:
+        return dtparser.parse(item.get("an_dt", ""))
+    except Exception:
+        return None
+
+
+def _bse_pdf_urls(item: dict) -> list[str]:
+    name = item.get("ATTACHMENTNAME", "")
+    if not name:
+        return []
+    return [base + name for base in BSE_ATTACHMENT_BASES]
+
+
+def _bse_subject(item: dict) -> str:
+    return f"{item.get('HEADLINE','')} {item.get('NEWSSUB','')}".strip()
+
+
+def _bse_event_date(item: dict) -> Optional[datetime]:
+    for key in ("NEWS_DT", "DT_TM"):
+        try:
+            if item.get(key):
+                return dtparser.parse(item[key])
+        except Exception:
+            continue
+    return None
+
+
+async def _download_pdf_text(client: httpx.AsyncClient, urls: list[str]) -> str:
+    """Try each candidate URL (BSE has both a 'live' and 'historical' path) until one works."""
+    for url in urls:
+        try:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25, follow_redirects=True)
+            if resp.status_code != 200 or not resp.content:
+                continue
+            reader = PdfReader(io.BytesIO(resp.content))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages[:60])
+            text = text.strip()
+            if text:
+                return text
+        except Exception as e:
+            logger.debug(f"PDF extract failed {url}: {e}")
+            continue
+    return ""
 
 
 async def fetch_documents(
     ticker: str, company: str, quarter: str, year: int,
     doc_types: list[str] | None = None, include_prior: bool = True,
+    bse_scripcode: str | None = None,
 ) -> list[SourceDocument]:
     if doc_types is None:
-        doc_types = ["earnings_call", "press_release", "investor_presentation", "news_article"]
+        doc_types = list(DEFAULT_DOC_TYPES)
+    doc_types_set = set(doc_types)
+    if "news_article" in doc_types_set or "broker_note" in doc_types_set:
+        logger.debug("news_article/broker_note are not available from NSE/BSE filings; skipping those types.")
+        doc_types_set -= {"news_article", "broker_note"}
 
     q_num = int(quarter[1])
-    tavily = TavilyClient(api_key=settings.TAVILY_API_KEY)
-
-    quarters_to_search = [(quarter, q_num, year)]
+    windows = [(quarter, q_num, year)]
     if include_prior:
         pq, py = (q_num - 1, year) if q_num > 1 else (4, year - 1)
-        quarters_to_search.append((f"Q{pq}", pq, py))
+        windows.append((f"Q{pq}", pq, py))
 
-    queries: list[str] = []
-    for ql, qn, yr in quarters_to_search:
-        for dt in doc_types:
-            for tmpl in QUERIES.get(dt, []):
-                queries.append(tmpl.format(company=company, ticker=ticker, quarter=ql, year=yr, q=qn))
+    nse: Optional[NSE] = None
+    try:
+        nse = await asyncio.to_thread(NSE, download_folder=str(settings.NSE_CACHE_DIR))
+    except Exception as e:
+        logger.warning(f"NSE client init failed (cookie handshake blocked?) — NSE filings will be skipped: {e}")
 
-    all_results: list[dict] = []
-    for i in range(0, len(queries), 6):
-        batch = await asyncio.gather(*[_search(tavily, q) for q in queries[i:i+6]])
-        for res in batch: all_results.extend(res)
-        await asyncio.sleep(0.3)
+    bse = BSE(download_folder=str(settings.BSE_CACHE_DIR))
 
-    seen: set[str] = set()
-    unique = []
-    for r in all_results:
-        url = r.get("url","")
-        if url and url not in seen:
-            seen.add(url); unique.append(r)
+    scripcode = bse_scripcode
+    if scripcode is None:
+        try:
+            scripcode = await asyncio.to_thread(bse.getScripCode, company)
+        except Exception as e:
+            logger.warning(f"BSE scrip code lookup failed for '{company}' — BSE filings will be skipped: {e}")
+            scripcode = None
 
-    def _rank(r: dict) -> int:
-        body = (r.get("content","") + r.get("title","")).lower()
-        return sum([
-            3 if "transcript" in body else 0,
-            2 if "earnings call" in body else 0,
-            2 if ticker.lower() in body else 0,
-            1 if "q&a" in body else 0,
-            2 if any(s in r.get("url","").lower() for s in TRANSCRIPT_SOURCES) else 0,
-        ])
+    raw_items: list[tuple[str, dict, str, int]] = []   # (source, item, quarter_label, fiscal_year)
+    for q_label, q_n, yr in windows:
+        start, end = _search_window(q_label, yr, doc_types_set)
 
-    unique.sort(key=_rank, reverse=True)
+        if nse is not None:
+            nse_items = await _fetch_nse(nse, ticker, start, end)
+            for item in nse_items:
+                raw_items.append(("NSE", item, q_label, yr))
 
-    async def _enrich(r: dict) -> dict:
-        if len(r.get("raw_content","") or "") < 600:
-            full = await _fetch_html(r.get("url",""))
-            if full: r["raw_content"] = full
-        return r
+        if scripcode:
+            bse_items = await _fetch_bse(bse, scripcode, start, end)
+            for item in bse_items:
+                raw_items.append(("BSE", item, q_label, yr))
 
-    enriched = await asyncio.gather(*[_enrich(r) for r in unique[:15]])
+    if nse is not None:
+        try:
+            nse.exit()
+        except Exception:
+            pass
+    try:
+        bse.exit()
+    except Exception:
+        pass
+
+    # Classify + dedupe by PDF url before downloading anything
+    candidates: list[dict] = []
+    seen_urls: set[str] = set()
+    for source, item, q_label, yr in raw_items:
+        if source == "NSE":
+            subject = _nse_subject(item)
+            urls = [_nse_pdf_url(item)] if _nse_pdf_url(item) else []
+            event_date = _nse_event_date(item)
+        else:
+            subject = _bse_subject(item)
+            urls = _bse_pdf_urls(item)
+            event_date = _bse_event_date(item)
+
+        if not urls or not urls[0]:
+            continue
+        dtype = _classify(subject, doc_types_set)
+        if dtype is None:
+            continue
+        key = urls[0]
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        candidates.append({
+            "urls": urls, "subject": subject, "doc_type": dtype,
+            "quarter": q_label, "fiscal_year": yr, "event_date": event_date,
+            "source": source,
+        })
+
+    # Rank: prefer earnings call / investor presentation / press release, then recency
+    _priority = {
+        DocumentType.EARNINGS_CALL: 0, DocumentType.INVESTOR_PRESENTATION: 1,
+        DocumentType.PRESS_RELEASE: 2, DocumentType.ANNUAL_REPORT: 3,
+        DocumentType.MANAGEMENT_COMMENTARY: 4,
+    }
+    candidates.sort(key=lambda c: (_priority.get(c["doc_type"], 9), c["event_date"] or datetime.min), reverse=False)
+    candidates = candidates[: settings.NSE_BSE_MAX_DOCS_PER_QUARTER * len(windows)]
+
     docs: list[SourceDocument] = []
+    async with httpx.AsyncClient() as client:
+        texts = await asyncio.gather(*[_download_pdf_text(client, c["urls"]) for c in candidates])
 
-    for r in enriched:
-        text = r.get("raw_content") or r.get("content","")
-        if len(text) < 200: continue
-        title = r.get("title",""); url = r.get("url","")
-        dtype = _infer_doc_type(text + title, url)
-        q_label, yr = _guess_quarter(title + text[:500], quarter, year)
+    for c, text in zip(candidates, texts):
+        if len(text) < 200:
+            continue
+        url = c["urls"][0]
         docs.append(SourceDocument(
-            doc_id=_doc_id(ticker, dtype.value, q_label, url),
-            ticker=ticker, company=company, doc_type=dtype,
-            quarter=q_label, fiscal_year=yr, source_url=url,
-            title=title, raw_text=text[:30000],
+            doc_id=_doc_id(ticker, c["doc_type"].value, c["quarter"], url),
+            ticker=ticker, company=company, doc_type=c["doc_type"],
+            quarter=c["quarter"], fiscal_year=c["fiscal_year"],
+            event_date=c["event_date"], source_url=url,
+            title=c["subject"][:200], raw_text=text[:30000],
         ))
 
-    logger.success(f"Fetched {len(docs)} documents for {ticker} {quarter} {year}")
+    logger.success(
+        f"Fetched {len(docs)} documents for {ticker} {quarter} {year} "
+        f"(NSE symbol={ticker}, BSE scripcode={scripcode or 'n/a'})"
+    )
     return docs
