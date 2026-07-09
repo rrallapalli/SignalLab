@@ -335,6 +335,81 @@ GET  /health                        Health check
 
 ---
 
+## 🔮 Alternate Architecture & Future Evolution: Self-Hosted / Open-Weight Models
+
+The current implementation calls the OpenAI API for both reasoning and
+embeddings, but the architecture is largely provider-agnostic — only two
+places actually touch OpenAI (`agents/base.py`'s `ChatOpenAI` client and the
+embedding function feeding ChromaDB). Everything downstream — RAG retrieval,
+agent logic, Pydantic schemas, DuckDB storage, the dashboard — has no
+OpenAI dependency. For an organization wanting to run this fully within
+their own infrastructure, here's the evolution path:
+
+### Why this is a small diff, not a rewrite
+Most self-hosted serving stacks — **vLLM**, **TGI (Text Generation
+Inference)**, **Ollama**, or an internal enterprise gateway — deliberately
+expose an **OpenAI-compatible `/v1/chat/completions` endpoint**. Since the
+codebase already uses `ChatOpenAI` from `langchain_openai`, pointing it at a
+self-hosted model is mostly a `base_url` override:
+
+```python
+ChatOpenAI(
+    model="meta-llama/Llama-3.3-70B-Instruct",
+    api_key="unused",
+    base_url="http://internal-llm-gateway:8000/v1",
+)
+```
+
+The clean way to wire this in: a small provider factory in `agents/base.py`,
+driven by config (`LLM_PROVIDER`, `LLM_BASE_URL`, `EMBED_PROVIDER`, etc.),
+defaulting to OpenAI so nothing changes for existing deployments.
+
+### Structured output gets *stronger*, not weaker
+Today's agents rely on OpenAI's `response_format: json_object` (JSON mode)
+plus a repair fallback. Self-hosted stacks offer a stricter mechanism —
+**grammar-constrained / guided decoding** tied directly to a JSON schema
+(vLLM's `guided_json` via Outlines/lm-format-enforcer, or TGI's equivalent).
+Since every agent already emits a Pydantic model, that schema can be handed
+straight to the guided decoder, making invalid JSON structurally impossible
+rather than just unlikely — a strict upgrade over the current approach.
+
+### Embeddings need a self-hosted counterpart
+ChromaDB currently embeds via OpenAI. Options: HuggingFace **Text Embeddings
+Inference (TEI)** serving a model like `BAAI/bge-large-en-v1.5`, or an
+in-process `sentence-transformers` model for a simpler single-node setup.
+Worth noting: a domain- or India/finance-tuned embedding model would likely
+retrieve better evidence from Indian filings than a generic English model,
+given local terminology, occasional Hinglish phrasing, and finance-specific
+jargon.
+
+### Model selection: two realistic paths
+- **Large general open-weight model** (no fine-tuning) — Llama 3.3 70B,
+  Qwen2.5-72B-Instruct, or DeepSeek-V3. Qwen is worth calling out for
+  structured-JSON reliability and multilingual handling.
+- **Fine-tuned smaller model** (likely the better fit here) — the pipeline
+  already generates thousands of labeled Confidence/Narrative/Guidance/Risk
+  JSON examples via GPT-4o/4o-mini every run. That's a ready-made
+  distillation dataset. LoRA fine-tuning a Llama-3.1-8B or Qwen2.5-7B/14B on
+  those examples can often match larger-model quality on this narrow,
+  schema-constrained task, at a fraction of the GPU footprint.
+
+### Other things that change with self-hosting
+- **Retry logic** (`_RETRY_EXC` in `base.py`) currently catches OpenAI-specific
+  exception types — needs updating if the self-hosted gateway uses a
+  different client library.
+- **Throughput**: each ticker run makes ~12 LLM calls (4 agents × 3 quarters).
+  Self-hosted serving benefits from batching concurrent requests — vLLM's
+  continuous batching handles this well, provided the orchestrator's
+  concurrency isn't leaving GPU capacity idle.
+- **Motivation check**: since NSE/BSE filings are public documents, there's
+  no data-residency argument for *this specific* ingestion pipeline as-is.
+  The realistic drivers for self-hosting are cost at scale, vendor
+  independence, latency control, or this pipeline eventually incorporating
+  non-public inputs (internal analyst notes, proprietary research) where
+  residency does matter.
+
+---
+
 ## ⚠️ Notes & Known Limitations
 
 - **This is an analytical tool, not investment advice.** Signals are LLM-
