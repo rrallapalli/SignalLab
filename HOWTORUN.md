@@ -1,12 +1,14 @@
-# How to Run Signal Intelligence
+# ▶️ How to Run — Signal Intelligence
 
 ---
 
 ## Prerequisites
 
 - Python **3.11** or **3.12**
-- One API key (OpenAI) — document ingestion from NSE/BSE needs no key
-- Network access to `nseindia.com` and `bseindia.com` (both are public but geo/rate sensitive; a VPN inside India can help if requests are being blocked)
+- One API key (**OpenAI**) — document ingestion from NSE/BSE needs no key
+- Outbound network access to `nseindia.com` and `bseindia.com` (both are public
+  but geo/rate sensitive; a VPN inside India can help if requests are blocked
+  from your network)
 - ~500MB disk space for the virtual environment
 
 ---
@@ -46,7 +48,9 @@ You should see `(.venv)` in your terminal prompt.
 pip install -r requirements.txt
 ```
 
-This takes 2–3 minutes the first time.
+This takes 2–3 minutes the first time. This installs the `nse` and `bse`
+packages used for direct exchange ingestion, alongside LangGraph, ChromaDB,
+DuckDB, and the rest of the signal-synthesis stack.
 
 ---
 
@@ -54,7 +58,8 @@ This takes 2–3 minutes the first time.
 
 **OpenAI** → [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - Create an account, add a payment method, generate a key
-- Recommended model: `gpt-4o-mini` (fast and cheap for development)
+- Recommended model: `gpt-4o-mini` (fast, cheap, and has a higher rate limit
+  than `gpt-4o` — good for development and most production runs)
 
 No key is needed for document ingestion — NSE and BSE corporate-announcement
 filings (results, investor decks, concall transcripts, annual reports) are
@@ -80,11 +85,45 @@ Optional settings you can also add to `.env`:
 OPENAI_MODEL=gpt-4o-mini    # or gpt-4o for higher quality
 OPENAI_TEMPERATURE=0.0
 TOP_K_RETRIEVAL=12
+
+# NSE/BSE fetch tuning
+NSE_BSE_RESULT_LAG_DAYS=90      # how far past quarter-end to keep searching
+NSE_BSE_ANNUAL_LAG_DAYS=200     # wider window when annual reports are requested
+NSE_BSE_MAX_DOCS_PER_QUARTER=15
 ```
+
+> **Note:** the signal agents call OpenAI with `response_format: json_object`
+> (JSON mode) to guarantee syntactically valid structured output. Both
+> `gpt-4o-mini` and `gpt-4o` support this — if you swap in a different model,
+> confirm it supports JSON mode first.
 
 ---
 
-## Step 6 — Launch the dashboard
+## Step 6 — Sanity-check NSE/BSE connectivity
+
+Before running the full pipeline (which costs OpenAI tokens), confirm your
+machine can actually reach the exchanges and download a filing:
+
+```bash
+python diagnose_fetch.py --ticker TCS --company "Tata Consultancy Services"
+```
+
+This walks through five steps independently and tells you exactly where
+things break, if they do:
+
+1. NSE cookie handshake
+2. NSE `announcements()` call
+3. BSE scrip-code lookup (from the company name)
+4. BSE `announcements()` call
+5. PDF download + validity check
+
+If steps 1–2 fail but 3–5 succeed, the pipeline will still run on BSE-only
+data (and vice versa) — the pipeline degrades gracefully rather than failing
+outright when one exchange is unreachable.
+
+---
+
+## Step 7 — Launch the dashboard
 
 ```bash
 streamlit run ui/dashboard.py
@@ -94,7 +133,7 @@ This opens `http://localhost:8501` in your browser automatically.
 
 ---
 
-## Step 7 — Run your first analysis
+## Step 8 — Run your first analysis
 
 In the dashboard sidebar:
 
@@ -107,6 +146,7 @@ In the dashboard sidebar:
 The pipeline will:
 - Pull corporate-announcement filings (results, investor presentations, concall transcripts, annual reports) directly from NSE and BSE for the relevant date windows
 - Download and extract text from each PDF attachment
+- Auto-detect the company's sector (Banking/NBFC, IT Services, Pharma, FMCG, Auto, Metals/Cement, Energy/Power, Telecom, Infrastructure, Real Estate, or General) to select the right theme taxonomy
 - Chunk and embed all documents into ChromaDB
 - Run four signal agents (Confidence, Narrative, Guidance, Risk) across three quarters
 - Save all results to a local DuckDB database
@@ -121,22 +161,25 @@ The pipeline will:
 If you want to anchor the analysis to a specific quarter rather than the auto-detected latest:
 
 1. Change the **Quarter** dropdown from `Auto` to e.g. `Q2`
-2. Set the **Year** to e.g. `2024`
+2. Set the **Year** to e.g. `2025`
 3. Click **Run Analysis**
 
-The system will then run signals for Q2 2024 (Latest), Q1 2024 (QoQ), and Q2 2023 (YoY).
+The system will then run signals for Q2 2025 (Latest), Q1 2025 (QoQ), and Q2 2024 (YoY).
 
 ---
 
 ## Loading previously analysed tickers
 
-Once you have run a ticker, it appears in the **Stored Tickers** dropdown in the sidebar. Select it to reload the full dashboard from the local database without re-running the pipeline.
+Once you have run a ticker, it appears in the **Stored Tickers → Load**
+dropdown at the top of the sidebar. Select it to reload the full dashboard
+from the local database without re-running the pipeline.
 
 ---
 
-## Diagnosing missing data
+## Diagnosing missing signals
 
-If sections appear blank or show "No data" for some periods, run the diagnostic tool:
+If sections appear blank or show "No data" for some periods, run the
+diagnostic tool:
 
 ```bash
 python diagnose_db.py
@@ -154,7 +197,11 @@ TCS
   Q1 2025   Conf:❌  Narr:❌  Guid:❌  Risk:❌
 ```
 
-Any ❌ means that signal was not stored — re-run the pipeline for that ticker to fill the gap.
+Any ❌ means that signal was not stored — re-run the pipeline for that ticker
+to fill the gap. Check `data/signal_agent.log` for the specific error (a
+common one: the LLM occasionally returns a stray `null` for a numeric field
+or malformed JSON — both are handled with null-safe coercion and a JSON
+repair fallback, but check the log if a signal still comes back empty).
 
 ---
 
@@ -165,6 +212,7 @@ If you want a completely clean start:
 ```bash
 rm data/signals.duckdb      # removes all stored signals
 rm -rf data/chroma/         # removes all vector embeddings
+rm -rf data/nse_cache/ data/bse_cache/   # removes NSE/BSE session cache
 ```
 
 Then re-run your tickers. Each ticker takes one click to fully populate all three quarters.
@@ -190,12 +238,21 @@ GET  /signals/{ticker}/risk         Get risk signal history
 GET  /tickers                       List all stored tickers
 ```
 
+> **Known gap:** `main.py run` (CLI) and the `/run` API endpoint both import
+> a `run_pipeline` function that doesn't currently exist in
+> `agents/orchestrator.py` (only `run_comparison_pipeline` does), so both
+> will fail on import today. This predates the NSE/BSE ingestion work and is
+> unrelated to it. The Streamlit dashboard calls the correct function and is
+> the supported entry point until this is fixed.
+
 ---
 
 ## Troubleshooting
 
 **`ModuleNotFoundError`**
-Make sure your virtual environment is active: `source .venv/bin/activate`
+Make sure your virtual environment is active: `source .venv/bin/activate`,
+and that you've re-run `pip install -r requirements.txt` after pulling any
+update to `requirements.txt` (e.g. the `nse`/`bse` packages).
 
 **`chromadb` install fails on Windows**
 ```bash
@@ -209,7 +266,7 @@ pip install duckdb==1.0.0 --force-reinstall
 
 **Pipeline fails with "Pipeline failed" in the dashboard**
 - Check that `OPENAI_API_KEY` in `.env` is valid
-- Confirm the ticker is a real NSE symbol and that this machine can reach `nseindia.com` and `bseindia.com` (some cloud/CI networks block these)
+- Confirm the ticker is a real NSE symbol and that this machine can reach `nseindia.com` and `bseindia.com` (some cloud/CI networks block these) — run `python diagnose_fetch.py --ticker <TICKER> --company "<Company Name>"` to isolate the failure
 - Try switching to `gpt-4o-mini` in the model selector — it has higher rate limits
 - Check `data/signal_agent.log` for detailed error messages
 
@@ -218,8 +275,24 @@ pip install duckdb==1.0.0 --force-reinstall
 - Smaller/thinly-covered companies may not publish concall transcripts as a formal filing — investor presentations and financial-results filings are usually still available
 - Widen `NSE_BSE_RESULT_LAG_DAYS` in `.env` if results were declared later than usual that quarter
 
+**BSE scrip code resolved to the wrong company**
+Auto-lookup is a fuzzy match on company name. Call `fetch_documents(...,
+bse_scripcode="500209")` with the correct code (found on bseindia.com)
+if you need to override it — this isn't yet wired into the dashboard UI as
+a manual field.
+
 **Sub-dimension scores showing `—`**
-The data exists but sub-dimensions were not scored in that run. Re-run the pipeline for that ticker — the fixed pipeline will populate all six sub-dimensions.
+The data exists but sub-dimensions were not scored in that run. Re-run the
+pipeline for that ticker to populate all six confidence sub-dimensions.
 
 **Rate limit errors**
-The pipeline staggers LLM calls and retries automatically. If you consistently hit limits, add `OPENAI_MODEL=gpt-4o-mini` to your `.env` — it has a much higher rate limit than gpt-4o.
+The pipeline staggers LLM calls and retries automatically with exponential
+backoff. If you consistently hit limits, set `OPENAI_MODEL=gpt-4o-mini` in
+your `.env` — it has a much higher rate limit than `gpt-4o`.
+
+**A signal fails with a JSON-related error**
+This should be rare now that agents use OpenAI's JSON mode, but if you see
+it: check `data/signal_agent.log` for the "JSON parse failed... Attempting
+repair" line and what follows it. The repair step handles trailing commas,
+smart quotes, and stray control characters; if it still fails, the raw
+response head is logged for debugging.
