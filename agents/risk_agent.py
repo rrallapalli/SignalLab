@@ -76,8 +76,8 @@ class RiskAgent(BaseAgent):
         "credit risk default delinquency loan loss",
     ]
 
-    def __init__(self, vs: VectorStore):
-        super().__init__(vs)
+    def __init__(self, vs: VectorStore, model: str | None = None):
+        super().__init__(vs, model)
 
     async def run(
         self,

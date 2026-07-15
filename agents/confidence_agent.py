@@ -68,8 +68,8 @@ class ConfidenceAgent(BaseAgent):
         "margin revenue growth target committed",
     ]
 
-    def __init__(self, vs: VectorStore):
-        super().__init__(vs)
+    def __init__(self, vs: VectorStore, model: str | None = None):
+        super().__init__(vs, model)
 
     async def run(
         self,

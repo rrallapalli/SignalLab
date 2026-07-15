@@ -79,8 +79,8 @@ class GuidanceAgent(BaseAgent):
         "NIM cost-income ratio return on equity targets",
     ]
 
-    def __init__(self, vs: VectorStore):
-        super().__init__(vs)
+    def __init__(self, vs: VectorStore, model: str | None = None):
+        super().__init__(vs, model)
 
     async def run(
         self,

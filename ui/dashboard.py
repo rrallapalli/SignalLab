@@ -161,6 +161,17 @@ def _run_async(coro):
 # ── Shared resources ──────────────────────────────────────────────────────────
 
 @st.cache_resource
+def _running_tickers() -> tuple[set, threading.Lock]:
+    """
+    Tickers with a pipeline in flight, shared across all browser sessions.
+    Streamlit runs each session's script in its own thread inside one process,
+    so two people (or two tabs) can start the same ticker at once and
+    double-write the same rows. This is the guard against that.
+    """
+    return set(), threading.Lock()
+
+
+@st.cache_resource
 def _stores():
     return VectorStore(), SignalStore()
 
@@ -394,9 +405,24 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════
 
 if run_btn:
-    from config import settings as cfg
-    cfg.OPENAI_MODEL = model_choice
     from agents.orchestrator import run_comparison_pipeline
+
+    active, active_lock = _running_tickers()
+    ticker_key = ticker_in.strip().upper()
+
+    with active_lock:
+        already_running = ticker_key in active
+        if not already_running:
+            active.add(ticker_key)
+
+    if already_running:
+        st.warning(
+            f"**{ticker_key} is already being analysed** — in another tab, or by "
+            "someone else on this machine. Wait for that run to finish rather than "
+            "starting a second one: both would write the same signals and bill the "
+            "OpenAI key twice."
+        )
+        st.stop()
 
     status_box = st.status("🔍 Fetching documents for 3 quarters…", expanded=True, state="running")
     progress   = st.progress(0, text="Starting…")
@@ -410,6 +436,10 @@ if run_btn:
                 ticker=ticker_in, company=company_in,
                 quarter=quarter_val, year=year_val,
                 vs=vs, ss=ss,
+                # Passed per-run. Never assign to settings.OPENAI_MODEL: it is a
+                # process-wide singleton shared by every browser session, so one
+                # user's choice would change the model under another user's run.
+                model=model_choice,
             ))
             progress.progress(85, text="Running signal agents…")
             st.write(f"✅ {result['docs_ingested']} docs ingested across 3 quarters")
@@ -437,6 +467,12 @@ if run_btn:
             "nseindia.com / bseindia.com."
         )
         st.stop()
+
+    finally:
+        # Must release even on failure/rerun, or the ticker stays locked out
+        # until the server restarts.
+        with active_lock:
+            active.discard(ticker_key)
 
 
 # ════════════════════════════════════════════════════════════

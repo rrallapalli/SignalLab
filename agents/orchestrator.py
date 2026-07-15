@@ -86,6 +86,7 @@ class ComparisonState(TypedDict):
     yoy_bundle:      Optional[dict]
     errors:          Annotated[list[str], operator.add]
     current_node:    str
+    model:           Optional[str]   # per-run LLM override; None → settings default
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -201,6 +202,7 @@ async def _run_signals_for_quarter(
     chunk_count: int,
     vs: VectorStore,
     ss: SignalStore,
+    model: str | None = None,
 ) -> SignalBundle:
     """
     Run all four signal agents for one quarter SEQUENTIALLY with small gaps.
@@ -230,10 +232,10 @@ async def _run_signals_for_quarter(
 
     conf_sig = narr_sig = guid_sig = risk_sig = None
     agent_defs = [
-        ("confidence", lambda: ConfidenceAgent(vs).run(ticker, company, quarter, year, prior_q)),
-        ("narrative",  lambda: NarrativeAgent(vs).run(ticker, company, quarter, year, prior_q)),
-        ("guidance",   lambda: GuidanceAgent(vs).run(ticker, company, quarter, year, all_quarters)),
-        ("risk",       lambda: RiskAgent(vs).run(ticker, company, quarter, year, prior_q)),
+        ("confidence", lambda: ConfidenceAgent(vs, model).run(ticker, company, quarter, year, prior_q)),
+        ("narrative",  lambda: NarrativeAgent(vs, model).run(ticker, company, quarter, year, prior_q)),
+        ("guidance",   lambda: GuidanceAgent(vs, model).run(ticker, company, quarter, year, all_quarters)),
+        ("risk",       lambda: RiskAgent(vs, model).run(ticker, company, quarter, year, prior_q)),
     ]
 
     for agent_name, agent_fn in agent_defs:
@@ -284,6 +286,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
     ticker, company = state["ticker"], state["company"]
     chunks = state.get("chunks_by_quarter", {})
     all_quarters = [state["latest_q"], state["qoq_q"], state["yoy_q"]]
+    model = state.get("model")   # per-run, not global
 
     async def _run_latest():
         return await _run_signals_for_quarter(
@@ -292,7 +295,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
             state["qoq_q"],
             all_quarters,
             chunks.get(f"{state['latest_q']} {state['latest_yr']}", 0),
-            vs, ss,
+            vs, ss, model,
         )
 
     async def _run_qoq():
@@ -303,7 +306,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
             _prior_quarter(state["qoq_q"], state["qoq_yr"])[0],
             all_quarters,
             chunks.get(f"{state['qoq_q']} {state['qoq_yr']}", 0),
-            vs, ss,
+            vs, ss, model,
         )
 
     async def _run_yoy():
@@ -314,7 +317,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
             _prior_quarter(state["yoy_q"], state["yoy_yr"])[0],
             all_quarters,
             chunks.get(f"{state['yoy_q']} {state['yoy_yr']}", 0),
-            vs, ss,
+            vs, ss, model,
         )
 
     logger.info(f"[signals] Running 3 quarters (staggered) for {ticker}")
@@ -386,6 +389,7 @@ async def run_comparison_pipeline(
     year: int | None = None,
     vs: VectorStore | None = None,
     ss: SignalStore | None = None,
+    model: str | None = None,
 ) -> dict:
     if vs is None: vs = VectorStore()
     if ss is None: ss = SignalStore()
@@ -412,6 +416,7 @@ async def run_comparison_pipeline(
         "yoy_bundle":       None,
         "errors":           [],
         "current_node":     "start",
+        "model":            model,
     }
 
     final: dict[str, Any] = {}

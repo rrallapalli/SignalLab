@@ -56,10 +56,16 @@ class BaseAgent:
       - llm_reason()    → structured JSON output with automatic retry
     """
 
-    def __init__(self, vector_store: VectorStore):
+    def __init__(self, vector_store: VectorStore, model: str | None = None):
+        """
+        `model` is passed per-run rather than read from global settings.
+        Mutating settings.OPENAI_MODEL to choose a model is unsafe: the
+        dashboard serves every browser session from one process, so a second
+        user's choice would silently change the model mid-run for the first.
+        """
         self.vs = vector_store
         self.llm = ChatOpenAI(
-            model=settings.OPENAI_MODEL,
+            model=model or settings.OPENAI_MODEL,
             temperature=settings.OPENAI_TEMPERATURE,
             api_key=settings.OPENAI_API_KEY,
             # Forces the API itself to guarantee syntactically valid JSON output,
