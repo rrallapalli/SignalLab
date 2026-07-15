@@ -24,29 +24,79 @@ Download from **[python.org/downloads](https://www.python.org/downloads/)** — 
 macOS and most Linux distributions already ship with Python — the start file
 will tell you if yours is too old.
 
-## 2 — Download SignalLab
+## 2 — Get SignalLab onto your computer
 
-On the [GitHub page](https://github.com/rrallapalli/SignalLab): green
-**Code** button → **Download ZIP** → unzip it somewhere you'll find again
-(Documents, Desktop — not inside the Downloads folder, and not a path with
-OneDrive sync if you can avoid it).
+**🍎 macOS — use this method.** Open **Terminal** (press `Cmd+Space`, type
+"Terminal", Enter) and paste:
 
-## 3 — Double-click the start file
+```bash
+git clone https://github.com/rrallapalli/SignalLab.git ~/SignalLab
+cd ~/SignalLab
+```
 
-| Your computer | Double-click |
-|---|---|
-| 🪟 **Windows** | `start.bat` |
-| 🍎 **macOS** | `start.command` |
-| 🐧 **Linux** | `start.sh` *(or run `./start.sh` in a terminal)* |
+This is not just a shortcut for developers. Files that arrive via a **browser
+download get tagged by macOS as untrusted**, and recent versions refuse to run
+them with a warning whose only buttons are *Done* and *Move to Bin* — no way to
+proceed. `git clone` doesn't apply that tag, so the app just runs. If you don't
+have `git`, macOS offers to install it the first time you type the command.
 
-A black terminal window opens. **That's normal — leave it open.** It is
-SignalLab's engine; closing it stops the app.
+**🪟 Windows / 🐧 Linux.** On the
+[GitHub page](https://github.com/rrallapalli/SignalLab): green **Code** button
+→ **Download ZIP** → unzip it.
 
-> **macOS:** the first double-click may be blocked with *"cannot be opened
-> because it is from an unidentified developer."* Right-click `start.command`
-> → **Open** → **Open**. You only do this once.
+### Where to put the folder
+
+Somewhere **not synced to the cloud**. SignalLab writes ~500MB of libraries
+plus a local database into its own folder, and cloud sync tools fight with
+that — especially when the drive is full.
+
+| | Good | Avoid |
+|---|---|---|
+| 🍎 macOS | `~/SignalLab` (your home folder) | **iCloud-synced `Documents` or `Desktop`** |
+| 🪟 Windows | `C:\SignalLab` or `C:\Users\you\SignalLab` | OneDrive-synced folders |
+| 🐧 Linux | anywhere in your home folder | — |
+
+> **macOS:** `Documents` and `Desktop` are synced to iCloud by default. Check
+> System Settings → your name → iCloud → iCloud Drive. If files in the folder
+> show a ☁️ cloud icon in Finder, move it: `mv ~/Documents/SignalLab ~/SignalLab`
+
+## 3 — Start it
+
+**🍎 macOS** — in the Terminal window you already have open:
+
+```bash
+cd ~/SignalLab
+./start.command
+```
+
+**🪟 Windows** — double-click **`start.bat`**.
+
+**🐧 Linux** — double-click **`start.sh`**, or run `./start.sh` in a terminal.
+
+A black terminal window opens (or the one you're in gets busy). **That's
+normal — leave it open.** It is SignalLab's engine; closing it stops the app.
+
+> **🍎 macOS — "Apple could not verify start.command is free of malware"?**
+> You downloaded the ZIP instead of cloning. Don't click *Move to Bin*, click
+> **Done**, then in Terminal:
 >
-> **Linux:** if double-clicking opens the file in a text editor instead of
+> ```bash
+> cd ~/SignalLab      # or wherever you put it
+> xattr -cr .
+> chmod +x start.command start.sh
+> ./start.command
+> ```
+>
+> `xattr -cr .` removes the untrusted-download tag from the folder. After that
+> double-clicking works too. (The old right-click → **Open** trick no longer
+> works on current macOS. The GUI route is System Settings → Privacy &
+> Security → scroll to the bottom → **Open Anyway** — the Terminal command is
+> quicker.)
+>
+> **🍎 macOS — "permission denied"?** The executable flag was lost in the ZIP:
+> `chmod +x start.command start.sh`
+>
+> **🐧 Linux:** if double-clicking opens the file in a text editor instead of
 > running it, right-click → Properties → tick *"Allow executing file as
 > program"*, or run `chmod +x start.sh` once.
 
@@ -110,7 +160,9 @@ Your browser opens at **`http://localhost:8501`**. Jump to
 
 To stop: close the browser tab and press `Ctrl+C` in the terminal window (or
 just close it).
-**To start again: double-click the same start file.** That's it.
+
+**To start again:** double-click the same start file (Windows/Linux), or on
+macOS run `cd ~/SignalLab && ./start.command`. That's it.
 
 ---
 
@@ -417,6 +469,24 @@ GET  /tickers                       List all stored tickers
 ---
 
 ## Troubleshooting
+
+**macOS: "Apple could not verify ‘start.command’ is free of malware"**
+Click **Done** (never *Move to Bin*), then `cd` to the folder and run
+`xattr -cr .` — this clears the untrusted-download tag macOS applies to files
+from a browser-downloaded ZIP. Cloning with `git clone` avoids this entirely.
+
+**macOS: `permission denied: ./start.command`**
+The executable bit didn't survive the download: `chmod +x start.command start.sh`
+
+**macOS: install fails, or files show a ☁️ cloud icon in Finder**
+The folder is inside iCloud-synced `Documents`/`Desktop`, and SignalLab needs to
+write ~500MB locally. Move it out: `mv ~/Documents/SignalLab ~/SignalLab`
+
+**macOS: `(base)` in your prompt / Anaconda Python**
+The launcher will build `.venv` from conda's Python, which normally works. If
+the install misbehaves, run `conda deactivate` and start again to use system
+Python instead.
+
 
 **`ModuleNotFoundError`**
 Make sure your virtual environment is active: `source .venv/bin/activate`,

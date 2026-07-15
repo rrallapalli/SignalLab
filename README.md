@@ -278,11 +278,15 @@ Full instructions: **[HOWTORUN.md](HOWTORUN.md)**.
 
 No terminal, no Python knowledge needed:
 
-| Your computer | Double-click |
+| Your computer | Do this |
 |---|---|
-| 🪟 Windows | `start.bat` |
-| 🍎 macOS | `start.command` |
-| 🐧 Linux | `start.sh` |
+| 🪟 Windows | Download ZIP, unzip, double-click `start.bat` |
+| 🍎 macOS | `git clone` the repo, then `./start.command` — see [HOWTORUN](HOWTORUN.md#2--get-signallab-onto-your-computer) |
+| 🐧 Linux | Download ZIP, unzip, double-click `start.sh` |
+
+> **macOS:** clone rather than downloading the ZIP. macOS quarantines
+> browser-downloaded scripts and blocks them with a dead-end malware warning;
+> cloned files aren't tagged.
 
 The launcher detects your OS, **pops up a window asking for your OpenAI key**
 (verifying it against OpenAI before saving), creates the virtual environment,
