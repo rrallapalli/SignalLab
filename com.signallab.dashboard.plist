@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SignalLab dashboard as a background service on macOS.
+
+  This is a TEMPLATE. Replace __USERNAME__ with your short username
+  (run `whoami`) and __PYTHON__ with your Python path (run `which python3`),
+  then install it:
+
+      cp deploy/com.signallab.dashboard.plist ~/Library/LaunchAgents/
+      launchctl load  ~/Library/LaunchAgents/com.signallab.dashboard.plist
+      launchctl list | grep signallab          # confirm it's running
+
+  Stop / uninstall:
+
+      launchctl unload ~/Library/LaunchAgents/com.signallab.dashboard.plist
+
+  Logs land in the two files below — check them first if it won't start.
+
+  NOTE: this is a LaunchAgent (~/Library/LaunchAgents), not a LaunchDaemon.
+  It runs as you, after you log in, which is what you want: it needs your
+  keychain and your Tailscale session. It does NOT run at the login screen.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.signallab.dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!--
+          caffeinate keeps the Mac awake while SignalLab runs:
+            -i  no idle sleep      -m  no disk sleep
+            -s  no system sleep on AC power
+          It does NOT defeat closing the lid. See HOSTING.md.
+        -->
+        <string>/usr/bin/caffeinate</string>
+        <string>-ims</string>
+        <string>__PYTHON__</string>
+        <string>/Users/__USERNAME__/SignalLab/start.py</string>
+        <string>--serve</string>
+        <string>--headless</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/__USERNAME__/SignalLab</string>
+
+    <!-- Start at login, and restart if it ever exits -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't hot-loop if it's crashing on startup -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/__USERNAME__/SignalLab/logs/dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/__USERNAME__/SignalLab/logs/dashboard.error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- LaunchAgents get a minimal PATH; Tailscale and Homebrew live here -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

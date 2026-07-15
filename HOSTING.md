@@ -209,9 +209,21 @@ on both ends.
 **"Tailscale is installed but not logged in / running"**
 `tailscale up`, or open the app and sign in.
 
-**Serve fails asking to enable HTTPS**
-Your tailnet needs HTTPS certificates switched on — the CLI prints a link.
-Follow it, then re-run `--serve`.
+**Hangs at `Enabling Tailscale Serve…`, or times out there**
+Your tailnet doesn't have HTTPS certificates enabled yet. `tailscale serve`
+prints a one-time link and waits for you to click it. Run it by hand to see
+the link:
+
+```bash
+tailscale serve --bg 8501
+# or, if the CLI isn't on PATH:
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg 8501
+```
+
+Follow the link, approve it, then `./start.command --serve` again. One-time
+only — Serve persists after that.
+
+Meanwhile `./start.command` with no flag still works on localhost.
 
 **Works on the Mac, not from the tailnet**
 Check Serve is actually configured: `tailscale serve status`

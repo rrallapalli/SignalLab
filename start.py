@@ -305,17 +305,33 @@ def enable_tailscale_serve(port: int = 8501) -> str | None:
         info("Install it from https://tailscale.com/download, then run with --serve again.")
         return None
 
-    state = subprocess.run([ts, "status"], capture_output=True, text=True)
+    try:
+        state = subprocess.run([ts, "status"], capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        warn("Tailscale didn't respond — starting on localhost only.")
+        return None
+
     if state.returncode != 0:
         warn("Tailscale is installed but not logged in / running.")
         info(f"Run: {ts} up")
         return None
 
-    result = subprocess.run([ts, "serve", "--bg", str(port)], capture_output=True, text=True)
+    info("Enabling Tailscale Serve…")
+    try:
+        # Deliberately NOT capturing output. If the tailnet doesn't have HTTPS
+        # certificates enabled yet, this command prints a link and waits for you
+        # to click it — capturing would hide the prompt and hang in silence.
+        result = subprocess.run([ts, "serve", "--bg", str(port)], timeout=90)
+    except subprocess.TimeoutExpired:
+        warn("Tailscale Serve is waiting on something and timed out.")
+        info("Run this by hand to see what it wants (usually a one-time link to")
+        info(f"enable HTTPS for your tailnet):  {ts} serve --bg {port}")
+        info("Starting on localhost only for now.")
+        return None
+
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        warn(f"Couldn't enable Tailscale Serve: {detail[:200]}")
-        info("If it asks you to enable HTTPS for the tailnet, follow the link it printed, then retry.")
+        warn("Couldn't enable Tailscale Serve (message above).")
+        info("Starting on localhost only.")
         return None
 
     url = _tailnet_url(ts)
