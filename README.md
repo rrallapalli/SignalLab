@@ -218,6 +218,9 @@ service for programmatic access.
 
 ```
 SignalLab/
+├── start.bat / start.command / start.sh   Double-click launchers (Windows / macOS / Linux)
+├── start.py                    One-click bootstrap: venv → deps → secrets → launch
+├── setup_secrets.py            API-key pop-up (tkinter) + terminal fallback, writes .env
 ├── main.py                     CLI: run · api · dashboard
 ├── config.py                   Settings from .env (incl. NSE/BSE fetch tuning)
 ├── models.py                   Pydantic models (documents + signals)
@@ -269,7 +272,26 @@ SignalLab/
 
 ## ▶️ How to Run
 
-Refer to [HOWTORUN.md](HOWTORUN.md) for full setup instructions.
+Full instructions: **[HOWTORUN.md](HOWTORUN.md)**.
+
+### Easiest — double-click to start
+
+No terminal, no Python knowledge needed:
+
+| Your computer | Double-click |
+|---|---|
+| 🪟 Windows | `start.bat` |
+| 🍎 macOS | `start.command` |
+| 🐧 Linux | `start.sh` |
+
+The launcher detects your OS, **pops up a window asking for your OpenAI key**
+(verifying it against OpenAI before saving), creates the virtual environment,
+installs dependencies, and opens the dashboard in your browser. First run takes
+~5 minutes; every run after is ~10 seconds. Only the OpenAI key is ever asked
+for — NSE/BSE ingestion is keyless. No display available (SSH, headless)? It
+falls back to a terminal prompt automatically.
+
+### For developers
 
 ```bash
 # 1. Create virtual environment
@@ -280,8 +302,8 @@ source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # 3. Configure your API key (only OpenAI is needed — NSE/BSE ingestion is keyless)
-cp .env.example .env
-# Edit .env → add OPENAI_API_KEY
+python setup_secrets.py       # pop-up wizard (--console to stay in the terminal)
+# ...or by hand: cp .env.example .env && edit it
 
 # 4. Sanity-check NSE/BSE connectivity before a real run
 python diagnose_fetch.py --ticker TCS --company "Tata Consultancy Services"
@@ -293,6 +315,10 @@ streamlit run ui/dashboard.py
 python main.py api
 ```
 
+Useful launcher flags — `python start.py --configure` (re-open the key
+pop-up) · `--reinstall` (rebuild `.venv`) · `--api` (FastAPI instead of the
+dashboard) · `--setup-only` (prepare, don't launch).
+
 ---
 
 ## 🔑 API Keys & Cost
@@ -300,6 +326,10 @@ python main.py api
 | Key | Source | Notes |
 |---|---|---|
 | `OPENAI_API_KEY` | platform.openai.com | Used for embeddings + reasoning |
+
+Double-click a start file (or run `python setup_secrets.py`) and a pop-up
+collects this, verifies it against OpenAI live, and writes it to a git-ignored
+`.env`. No terminal knowledge required.
 
 Document ingestion needs **no API key** — NSE and BSE corporate-announcement
 filings are public. You do need outbound network access to `nseindia.com`

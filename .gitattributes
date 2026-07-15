@@ -1,0 +1,16 @@
+# Normalise line endings so the launchers work on every OS.
+* text=auto
+
+# Unix launchers MUST stay LF — a CRLF shebang gives
+# "bad interpreter: /usr/bin/env bash^M" on macOS/Linux.
+*.sh        text eol=lf
+*.command   text eol=lf
+*.py        text eol=lf
+
+# Windows batch files want CRLF.
+*.bat       text eol=crlf
+
+# Never touch binaries.
+*.pdf       binary
+*.png       binary
+*.duckdb    binary

@@ -1,17 +1,190 @@
 # ▶️ How to Run — Signal Intelligence
 
+There are two ways to run SignalLab:
+
+| | Who it's for | Time |
+|---|---|---|
+| **🚀 Quick Start** — double-click a start file | Anyone. No terminal, no Python knowledge. | ~5 min first time, ~10 sec after |
+| **🧰 Manual Setup** — venv + pip by hand | Developers who want control over the environment | ~10 min |
+
+Both end up in exactly the same place. Start with Quick Start.
+
 ---
+
+# 🚀 Quick Start
+
+## 1 — Install Python (one time)
+
+Download from **[python.org/downloads](https://www.python.org/downloads/)** — version **3.10 to 3.13**.
+
+> **Windows users:** on the first installer screen, tick the box that says
+> **"Add python.exe to PATH"** before clicking Install. This is the single
+> most common thing people miss.
+
+macOS and most Linux distributions already ship with Python — the start file
+will tell you if yours is too old.
+
+## 2 — Download SignalLab
+
+On the [GitHub page](https://github.com/rrallapalli/SignalLab): green
+**Code** button → **Download ZIP** → unzip it somewhere you'll find again
+(Documents, Desktop — not inside the Downloads folder, and not a path with
+OneDrive sync if you can avoid it).
+
+## 3 — Double-click the start file
+
+| Your computer | Double-click |
+|---|---|
+| 🪟 **Windows** | `start.bat` |
+| 🍎 **macOS** | `start.command` |
+| 🐧 **Linux** | `start.sh` *(or run `./start.sh` in a terminal)* |
+
+A black terminal window opens. **That's normal — leave it open.** It is
+SignalLab's engine; closing it stops the app.
+
+> **macOS:** the first double-click may be blocked with *"cannot be opened
+> because it is from an unidentified developer."* Right-click `start.command`
+> → **Open** → **Open**. You only do this once.
+>
+> **Linux:** if double-clicking opens the file in a text editor instead of
+> running it, right-click → Properties → tick *"Allow executing file as
+> program"*, or run `chmod +x start.sh` once.
+
+## 4 — Paste your OpenAI key into the pop-up
+
+On the very first run a small setup window appears:
+
+```
+┌───────────────────────────────────────────┐
+│  SignalLab Setup                          │
+│  One-time setup. Your key is stored       │
+│  locally in a file called .env.           │
+│  ─────────────────────────────────────    │
+│  OpenAI API key               (required)  │
+│  [ ••••••••••••••••••••••••••••••••••• ]  │
+│  ☐ Show key      [ Get a key from OpenAI ]│
+│                                           │
+│  Reasoning model                          │
+│  [ gpt-4o-mini              ▾ ]           │
+│                                           │
+│  Embedding model                          │
+│  [ text-embedding-3-small   ▾ ]           │
+│                                           │
+│              [ Save & Start ]  [ Cancel ] │
+└───────────────────────────────────────────┘
+```
+
+1. Click **Get a key from OpenAI** — it opens
+   [platform.openai.com/api-keys](https://platform.openai.com/api-keys) in your
+   browser. Create a key and copy it. You'll need a payment method on the
+   OpenAI account; a typical run costs **$0.10–$0.30** with `gpt-4o-mini`.
+2. Paste it into the box. Tick **Show key** if you want to check it pasted.
+3. Leave both model dropdowns alone — the defaults are the recommended ones.
+4. Click **Save & Start**.
+
+The window checks your key against OpenAI live and tells you straight away
+whether it works, rather than letting you find out four minutes later. It then
+saves everything to a local file called `.env` and setup continues on its own.
+**You are never asked for the key again.**
+
+> **No key is needed for the data itself.** NSE and BSE corporate filings are
+> public and fetched directly.
+
+> **Don't see the window?** It may be behind the terminal window, or on your
+> other monitor.
+>
+> **On Linux** the pop-up needs Tk installed — `sudo apt install python3-tk`
+> (Ubuntu/Debian) or `sudo dnf install python3-tkinter` (Fedora). Without it,
+> SignalLab automatically falls back to asking for the key in the terminal
+> instead. Nothing breaks either way.
+
+## 5 — Wait for the first install
+
+The start file downloads about 500MB of libraries. This takes **2–5 minutes
+and happens only once** — every later start skips straight to launching.
+
+## 6 — The dashboard opens
+
+Your browser opens at **`http://localhost:8501`**. Jump to
+[Run your first analysis](#️-run-your-first-analysis) below.
+
+To stop: close the browser tab and press `Ctrl+C` in the terminal window (or
+just close it).
+**To start again: double-click the same start file.** That's it.
+
+---
+
+## What the start file actually does
+
+No magic — it runs the manual steps for you, in order, and skips any that are
+already done:
+
+1. Finds Python and checks the version is supported
+2. Opens the secrets pop-up if `.env` doesn't exist yet (terminal prompt if no display)
+3. Creates the `.venv` virtual environment if it isn't there
+4. Installs `requirements.txt` — and re-installs automatically if
+   `requirements.txt` has changed since last time
+5. Launches Streamlit and opens your browser
+
+If any step fails it stops and prints a plain-English reason and a fix,
+rather than a stack trace.
+
+## The files involved
+
+| File | What it is |
+|---|---|
+| `start.bat` | Windows double-click launcher — finds Python, calls `start.py` |
+| `start.command` | macOS double-click launcher — same job |
+| `start.sh` | Linux launcher — same job |
+| `start.py` | The real logic: venv, dependencies, secrets check, launch. Cross-platform. |
+| `setup_secrets.py` | The API-key pop-up (and its terminal fallback). Writes `.env`. Runs standalone too. |
+| `.env` | Your saved keys. **Git-ignored — never commit or share it.** |
+| `.env.example` | Template showing every setting, if you'd rather edit by hand |
+
+## Changing your API key later
+
+```bash
+python setup_secrets.py           # re-open the pop-up, pre-filled
+python setup_secrets.py --console # same, but in the terminal
+python setup_secrets.py --show    # see current config (key masked)
+```
+
+Or double-click the start file with the `--configure` flag — see below.
+
+Or edit `.env` directly — it's a plain text file with comments explaining
+each setting.
+
+## Start file options
+
+For anything beyond a plain launch, pass a flag to the start file (or run
+`start.py` directly):
+
+```bash
+python start.py                # dashboard (what double-clicking does)
+python start.py --api          # FastAPI backend on :8000 instead
+python start.py --configure    # re-open the key pop-up, then start
+python start.py --console      # ask for the key in the terminal, no pop-up
+python start.py --reinstall    # nuke .venv and rebuild from scratch
+python start.py --setup-only   # install everything, don't launch
+```
+
+Windows: `start.bat --api` · macOS/Linux: `./start.sh --api`
+
+---
+
+# 🧰 Manual Setup
+
+Everything below is what the start file automates. Use this if you want to
+manage the environment yourself.
 
 ## Prerequisites
 
-- Python **3.11** or **3.12**
+- Python **3.11** or **3.12** (3.10 and 3.13 also work)
 - One API key (**OpenAI**) — document ingestion from NSE/BSE needs no key
 - Outbound network access to `nseindia.com` and `bseindia.com` (both are public
   but geo/rate sensitive; a VPN inside India can help if requests are blocked
   from your network)
 - ~500MB disk space for the virtual environment
-
----
 
 ## Step 1 — Clone the repo
 
@@ -19,8 +192,6 @@
 git clone https://github.com/rrallapalli/SignalLab.git
 cd SignalLab
 ```
-
----
 
 ## Step 2 — Create a virtual environment
 
@@ -40,8 +211,6 @@ source .venv/bin/activate
 
 You should see `(.venv)` in your terminal prompt.
 
----
-
 ## Step 3 — Install dependencies
 
 ```bash
@@ -51,8 +220,6 @@ pip install -r requirements.txt
 This takes 2–3 minutes the first time. This installs the `nse` and `bse`
 packages used for direct exchange ingestion, alongside LangGraph, ChromaDB,
 DuckDB, and the rest of the signal-synthesis stack.
-
----
 
 ## Step 4 — Get your API key
 
@@ -65,9 +232,15 @@ No key is needed for document ingestion — NSE and BSE corporate-announcement
 filings (results, investor decks, concall transcripts, annual reports) are
 fetched directly and are public.
 
----
-
 ## Step 5 — Configure environment
+
+Easiest way, even here:
+
+```bash
+python setup_secrets.py
+```
+
+Or by hand:
 
 ```bash
 cp .env.example .env
@@ -79,12 +252,12 @@ Open `.env` and fill in your key:
 OPENAI_API_KEY=sk-...
 ```
 
-Optional settings you can also add to `.env`:
+Optional settings you can also set in `.env`:
 
 ```
 OPENAI_MODEL=gpt-4o-mini    # or gpt-4o for higher quality
+EMBED_MODEL=text-embedding-3-small
 OPENAI_TEMPERATURE=0.0
-TOP_K_RETRIEVAL=12
 
 # NSE/BSE fetch tuning
 NSE_BSE_RESULT_LAG_DAYS=90      # how far past quarter-end to keep searching
@@ -96,8 +269,6 @@ NSE_BSE_MAX_DOCS_PER_QUARTER=15
 > (JSON mode) to guarantee syntactically valid structured output. Both
 > `gpt-4o-mini` and `gpt-4o` support this — if you swap in a different model,
 > confirm it supports JSON mode first.
-
----
 
 ## Step 6 — Sanity-check NSE/BSE connectivity
 
@@ -121,8 +292,6 @@ If steps 1–2 fail but 3–5 succeed, the pipeline will still run on BSE-only
 data (and vice versa) — the pipeline degrades gracefully rather than failing
 outright when one exchange is unreachable.
 
----
-
 ## Step 7 — Launch the dashboard
 
 ```bash
@@ -133,7 +302,7 @@ This opens `http://localhost:8501` in your browser automatically.
 
 ---
 
-## Step 8 — Run your first analysis
+## ▶️ Run your first analysis
 
 In the dashboard sidebar:
 
