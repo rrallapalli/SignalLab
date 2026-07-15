@@ -17,6 +17,7 @@ But it works fine on its own too:
     python start.py --console      # ask for the key in the terminal, no pop-up
     python start.py --reinstall    # rebuild the virtual environment
     python start.py --setup-only   # prepare everything, don't launch
+    python start.py --serve        # share on your Tailscale tailnet (HTTPS)
 
 Stdlib only — this file must run before anything is installed.
 """
@@ -258,6 +259,72 @@ def install_deps(py: Path, force: bool) -> None:
 # ── Step 5: Launch ───────────────────────────────────────────────────────────
 
 
+def _tailscale_bin() -> str | None:
+    """
+    Find the tailscale CLI. On macOS the Mac App Store / Standalone builds do
+    not put it on PATH — the binary lives inside the app bundle.
+    """
+    import shutil
+
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    for candidate in (
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+    ):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _tailnet_url(ts: str) -> str | None:
+    """Resolve this machine's MagicDNS name, e.g. rashmis-macbook-air.tailnet.ts.net"""
+    try:
+        out = subprocess.run([ts, "status", "--json"], capture_output=True, text=True, timeout=15)
+        if out.returncode != 0:
+            return None
+        name = json.loads(out.stdout).get("Self", {}).get("DNSName", "").rstrip(".")
+        return f"https://{name}" if name else None
+    except Exception:
+        return None
+
+
+def enable_tailscale_serve(port: int = 8501) -> str | None:
+    """
+    Publish the dashboard to the tailnet over HTTPS. Returns the URL, or None.
+
+    Serve proxies from the tailnet to 127.0.0.1, so the dashboard stays bound to
+    localhost and is unreachable from the LAN — only tailnet members get in, and
+    Tailscale terminates TLS with a real certificate.
+    """
+    ts = _tailscale_bin()
+    if not ts:
+        warn("Tailscale not found — starting on localhost only.")
+        info("Install it from https://tailscale.com/download, then run with --serve again.")
+        return None
+
+    state = subprocess.run([ts, "status"], capture_output=True, text=True)
+    if state.returncode != 0:
+        warn("Tailscale is installed but not logged in / running.")
+        info(f"Run: {ts} up")
+        return None
+
+    result = subprocess.run([ts, "serve", "--bg", str(port)], capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        warn(f"Couldn't enable Tailscale Serve: {detail[:200]}")
+        info("If it asks you to enable HTTPS for the tailnet, follow the link it printed, then retry.")
+        return None
+
+    url = _tailnet_url(ts)
+    ok("Tailscale Serve enabled — the dashboard is on your tailnet")
+    info("Serve persists across reboots. Turn it off with: "
+         f"{ts} serve --bg {port} off")
+    return url
+
+
 def _silence_streamlit_prompts() -> None:
     """Skip Streamlit's first-run email prompt, which blocks an unattended start."""
     creds = Path.home() / ".streamlit" / "credentials.toml"
@@ -270,28 +337,41 @@ def _silence_streamlit_prompts() -> None:
         pass
 
 
-def launch_dashboard(py: Path) -> int:
+def launch_dashboard(py: Path, serve: bool = False, headless: bool = False) -> int:
     if not DASHBOARD.exists():
         raise StartupError(f"Dashboard not found at {DASHBOARD}.", fix="Re-download the project.")
 
     _silence_streamlit_prompts()
     env = dict(os.environ, STREAMLIT_BROWSER_GATHER_USAGE_STATS="false", PYTHONPATH=str(ROOT))
 
+    tailnet_url = enable_tailscale_serve(8501) if serve else None
+
     say()
     say(f"{GREEN}{'═' * 62}{RESET}")
     say(f"{BOLD}  🚀  SignalLab is starting…{RESET}")
-    say(f"{DIM}  Your browser will open at http://localhost:8501{RESET}")
+    if tailnet_url:
+        say(f"{BOLD}  On your tailnet:  {tailnet_url}{RESET}")
+        say(f"{DIM}  Anyone signed in to your tailnet can open that URL.{RESET}")
+    say(f"{DIM}  On this Mac:      http://localhost:8501{RESET}")
     say(f"{DIM}  Keep this window open while you use the app.{RESET}")
     say(f"{DIM}  Press Ctrl+C here (or just close this window) to stop.{RESET}")
     say(f"{GREEN}{'═' * 62}{RESET}")
     say()
 
+    cmd = [
+        str(py), "-m", "streamlit", "run", str(DASHBOARD),
+        "--server.port=8501",
+        # Bind to loopback only. Streamlit's default is every interface, which
+        # would put the dashboard on whatever wifi this laptop joins. Tailscale
+        # Serve proxies in from the tailnet, so localhost is all we need — and
+        # it stops anyone on the LAN bypassing Serve to spoof identity headers.
+        "--server.address=127.0.0.1",
+    ]
+    if headless or serve:
+        cmd.append("--server.headless=true")   # don't pop a browser on a host machine
+
     try:
-        return subprocess.run(
-            [str(py), "-m", "streamlit", "run", str(DASHBOARD), "--server.port=8501"],
-            env=env,
-            cwd=str(ROOT),
-        ).returncode
+        return subprocess.run(cmd, env=env, cwd=str(ROOT)).returncode
     except KeyboardInterrupt:
         say(f"\n{DIM}SignalLab stopped. Run the start file again any time.{RESET}")
         return 0
@@ -328,6 +408,8 @@ def main() -> int:
     parser.add_argument("--console", action="store_true", help="Ask for the API key in this terminal, no pop-up.")
     parser.add_argument("--reinstall", action="store_true", help="Delete .venv and reinstall everything.")
     parser.add_argument("--setup-only", action="store_true", help="Set everything up but don't launch.")
+    parser.add_argument("--serve", action="store_true", help="Publish to your Tailscale tailnet over HTTPS.")
+    parser.add_argument("--headless", action="store_true", help="Don't open a browser (for host machines).")
     args = parser.parse_args()
 
     banner()
@@ -351,7 +433,7 @@ def main() -> int:
         return 0
 
     step(5, total, "Launching")
-    return launch_api(py) if args.api else launch_dashboard(py)
+    return launch_api(py) if args.api else launch_dashboard(py, serve=args.serve, headless=args.headless)
 
 
 if __name__ == "__main__":

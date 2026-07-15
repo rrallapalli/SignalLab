@@ -219,7 +219,7 @@ service for programmatic access.
 ```
 SignalLab/
 ├── start.bat / start.command / start.sh   Double-click launchers (Windows / macOS / Linux)
-├── start.py                    One-click bootstrap: venv → deps → secrets → launch
+├── start.py                    One-click bootstrap: venv → deps → secrets → launch (--serve for tailnet)
 ├── setup_secrets.py            API-key pop-up (tkinter) + terminal fallback, writes .env
 ├── main.py                     CLI: run · api · dashboard
 ├── config.py                   Settings from .env (incl. NSE/BSE fetch tuning)
@@ -273,6 +273,7 @@ SignalLab/
 ## ▶️ How to Run
 
 Full instructions: **[HOWTORUN.md](HOWTORUN.md)**.
+Sharing it with a small team over Tailscale: **[HOSTING.md](HOSTING.md)**.
 
 ### Easiest — double-click to start
 
