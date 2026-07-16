@@ -86,22 +86,28 @@ class GuidanceAgent(BaseAgent):
         self,
         ticker: str, company: str,
         quarter: str, fiscal_year: int,
-        quarters_to_compare: list[str],   # all quarters in store
+        periods_to_compare: list[tuple[str, int]],   # (quarter, year) pairs
     ) -> GuidanceSignal:
         logger.info(f"[GuidanceAgent] Running for {ticker} {quarter} {fiscal_year}")
 
-        # Retrieve guidance statements from ALL available quarters
+        # Retrieve guidance statements across the compared periods. Pairs, not
+        # bare quarter labels — otherwise this pulls guidance from every year on
+        # record and scores the company's credibility against the wrong promises.
         chunks = self.rag_retrieve(
             queries=self.GUIDANCE_QUERIES, ticker=ticker,
-            quarters=quarters_to_compare,
+            periods=periods_to_compare,
             sections=["guidance", "financial_results", "prepared_remarks"],
             top_k_per_query=6,
         )
         citations = self.vs.as_citations(chunks[:8])
 
+        # Full periods in the prompt too — "Q1, Q4, Q1" tells the model nothing
+        # about which year's guidance it is auditing against which year's results.
+        periods_label = ", ".join(f"{q} {y}" for q, y in periods_to_compare)
+
         user_prompt = f"""Company: {company} ({ticker})
 Current Quarter Being Scored: {quarter} {fiscal_year}
-All Available Quarters: {', '.join(quarters_to_compare)}
+Periods Being Compared: {periods_label}
 
 === EVIDENCE (guidance statements + actual results across quarters) ===
 {self.format_evidence(chunks[:14]) or "No guidance evidence retrieved."}

@@ -83,7 +83,7 @@ class BaseAgent:
         self,
         queries: list[str],
         ticker: str,
-        quarters: list[str] | None = None,
+        periods: list[tuple[str, int | str]] | None = None,
         quarter: str | None = None,
         fiscal_year: int | str | None = None,
         doc_types: list[str] | None = None,
@@ -97,7 +97,8 @@ class BaseAgent:
 
         Pass `fiscal_year` whenever you pass `quarter`. Quarter alone is not a
         period: "Q1" matches Q1 of every year in the store, so a Q1-2026 query
-        silently pulls Q1-2025 evidence too.
+        silently pulls Q1-2025 evidence too. For several periods at once, pass
+        `periods=[(quarter, year), ...]`.
         """
         seen: dict[str, tuple[Any, float]] = {}
 
@@ -108,7 +109,7 @@ class BaseAgent:
                     n_results=top_k_per_query,
                     quarter=quarter,
                     fiscal_year=fiscal_year,
-                    quarters=quarters,
+                    periods=periods,
                     doc_types=doc_types,
                     sections=sections,
                     management_only=management_only,

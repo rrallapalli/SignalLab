@@ -198,7 +198,7 @@ async def _run_signals_for_quarter(
     ticker: str, company: str,
     quarter: str, year: int,
     prior_q: str, prior_yr: int,
-    all_quarters: list[str],
+    all_periods: list[tuple[str, int]],
     chunk_count: int,
     vs: VectorStore,
     ss: SignalStore,
@@ -234,7 +234,7 @@ async def _run_signals_for_quarter(
     agent_defs = [
         ("confidence", lambda: ConfidenceAgent(vs, model).run(ticker, company, quarter, year, prior_q, prior_yr)),
         ("narrative",  lambda: NarrativeAgent(vs, model).run(ticker, company, quarter, year, prior_q, prior_yr)),
-        ("guidance",   lambda: GuidanceAgent(vs, model).run(ticker, company, quarter, year, all_quarters)),
+        ("guidance",   lambda: GuidanceAgent(vs, model).run(ticker, company, quarter, year, all_periods)),
         ("risk",       lambda: RiskAgent(vs, model).run(ticker, company, quarter, year, prior_q, prior_yr)),
     ]
 
@@ -285,7 +285,12 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
     """
     ticker, company = state["ticker"], state["company"]
     chunks = state.get("chunks_by_quarter", {})
-    all_quarters = [state["latest_q"], state["qoq_q"], state["yoy_q"]]
+    # (quarter, year) pairs — a bare quarter label is not a period.
+    all_periods = [
+        (state["latest_q"], state["latest_yr"]),
+        (state["qoq_q"],    state["qoq_yr"]),
+        (state["yoy_q"],    state["yoy_yr"]),
+    ]
     model = state.get("model")   # per-run, not global
 
     async def _run_latest():
@@ -293,7 +298,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
             ticker, company,
             state["latest_q"], state["latest_yr"],
             state["qoq_q"], state["qoq_yr"],
-            all_quarters,
+            all_periods,
             chunks.get(f"{state['latest_q']} {state['latest_yr']}", 0),
             vs, ss, model,
         )
@@ -304,7 +309,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
             ticker, company,
             state["qoq_q"], state["qoq_yr"],
             *_prior_quarter(state["qoq_q"], state["qoq_yr"]),
-            all_quarters,
+            all_periods,
             chunks.get(f"{state['qoq_q']} {state['qoq_yr']}", 0),
             vs, ss, model,
         )
@@ -315,7 +320,7 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
             ticker, company,
             state["yoy_q"], state["yoy_yr"],
             *_prior_quarter(state["yoy_q"], state["yoy_yr"]),
-            all_quarters,
+            all_periods,
             chunks.get(f"{state['yoy_q']} {state['yoy_yr']}", 0),
             vs, ss, model,
         )

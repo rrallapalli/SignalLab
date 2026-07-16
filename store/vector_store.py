@@ -86,7 +86,7 @@ class VectorStore:
         doc_types: list[str] | None = None,
         sections: list[str] | None = None,
         management_only: bool = False,
-        quarters: list[str] | None = None,   # multi-quarter retrieval
+        periods: list[tuple[str, int | str]] | None = None,
     ) -> list[tuple[DocumentChunk, float]]:
         """
         Semantic retrieval with optional metadata filters.
@@ -98,6 +98,12 @@ class VectorStore:
         A Q1-2026 query then returns Q1-2025 chunks, a YoY comparison ends up
         scoring the same pooled evidence twice, and the delta collapses to 0.0.
         Always pass fiscal_year alongside quarter for single-period retrieval.
+
+        For MULTI-period retrieval use `periods` — a list of (quarter, year)
+        pairs, e.g. [("Q1", 2026), ("Q4", 2025)]. The previous `quarters` list
+        took bare quarter labels and had the same year-blind flaw at scale:
+        {"quarter": {"$in": ["Q1","Q4"]}} matches Q1/Q4 of EVERY year. A period
+        is a pair; there is deliberately no way to express it as one string.
         """
         n = n_results or settings.TOP_K_RETRIEVAL
         embedding = self._embed([query])[0]
@@ -105,13 +111,30 @@ class VectorStore:
         where: dict[str, Any] = {"ticker": ticker}
         filters: list[dict] = [{"ticker": ticker}]
 
-        if quarter and not quarters:
+        if quarter and not periods:
             filters.append({"quarter": quarter})
-        if quarters:
-            filters.append({"quarter": {"$in": quarters}})
-        if fiscal_year is not None:
+        if fiscal_year is not None and not periods:
             # Stored as a string at ingestion — compare like for like.
             filters.append({"fiscal_year": str(fiscal_year)})
+
+        if periods:
+            # Dedupe but keep order stable.
+            uniq: list[tuple[str, str]] = []
+            for q_, y_ in periods:
+                pair = (q_, str(y_))
+                if pair not in uniq:
+                    uniq.append(pair)
+
+            clauses = [
+                {"$and": [{"quarter": q_}, {"fiscal_year": y_}]} for q_, y_ in uniq
+            ]
+            if len(clauses) == 1:
+                # Chroma rejects $or/$and with fewer than two expressions, and a
+                # rejected filter falls back to a ticker-only query — i.e. the
+                # whole corpus, unfiltered. Flatten the single-period case.
+                filters.extend([{"quarter": uniq[0][0]}, {"fiscal_year": uniq[0][1]}])
+            elif clauses:
+                filters.append({"$or": clauses})
         if doc_types:
             filters.append({"doc_type": {"$in": doc_types}})
         if sections:
