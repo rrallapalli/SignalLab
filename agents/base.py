@@ -81,6 +81,7 @@ class BaseAgent:
         ticker: str,
         quarters: list[str] | None = None,
         quarter: str | None = None,
+        fiscal_year: int | str | None = None,
         doc_types: list[str] | None = None,
         sections: list[str] | None = None,
         management_only: bool = False,
@@ -89,6 +90,10 @@ class BaseAgent:
         """
         Multi-query RAG retrieval. Deduplicates by chunk_id keeping
         highest relevance score.
+
+        Pass `fiscal_year` whenever you pass `quarter`. Quarter alone is not a
+        period: "Q1" matches Q1 of every year in the store, so a Q1-2026 query
+        silently pulls Q1-2025 evidence too.
         """
         seen: dict[str, tuple[Any, float]] = {}
 
@@ -98,6 +103,7 @@ class BaseAgent:
                     query=q, ticker=ticker,
                     n_results=top_k_per_query,
                     quarter=quarter,
+                    fiscal_year=fiscal_year,
                     quarters=quarters,
                     doc_types=doc_types,
                     sections=sections,

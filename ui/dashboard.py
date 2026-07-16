@@ -4,7 +4,7 @@ Run: streamlit run ui/dashboard.py
 """
 
 from __future__ import annotations
-import sys, json, asyncio, threading
+import sys, json, asyncio, threading, html
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -22,7 +22,9 @@ st.set_page_config(
     page_title="Signal Intelligence",
     page_icon="📡",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # "auto" = hidden on small devices, shown otherwise. "expanded" made the
+    # sidebar cover the whole screen on a phone before you could see anything.
+    initial_sidebar_state="auto",
 )
 
 st.markdown("""
@@ -138,6 +140,141 @@ st.markdown("""
   /* Small colour-coded legend chips explaining the gauge thresholds */
   .legend-row { display:flex; gap:1.1rem; flex-wrap:wrap; font-size:0.78rem; color: var(--text-low); margin: 0.2rem 0 0.8rem 0; }
   .legend-dot { display:inline-block; width:0.55rem; height:0.55rem; border-radius:50%; margin-right:0.35rem; vertical-align:middle; }
+
+  /* ══════════════════════════════════════════════════════════════════════
+     RESPONSIVE COMPARISON GRID
+     ══════════════════════════════════════════════════════════════════════
+     st.columns() is a desktop layout instruction with no responsive escape
+     hatch — Streamlit owns that markup, so a 4-across comparison just gets
+     squeezed to ~90px a column on a phone. The comparison sections are
+     emitted as one HTML block instead, so media queries can restack them:
+
+       desktop  →  label | Latest | QoQ | YoY   (4 across)
+       mobile   →  one card per metric, each quarter on its own line
+  */
+  .cmp { display:flex; flex-direction:column; gap:0.35rem; margin:0.4rem 0 0.2rem; }
+  .cmp-row {
+    display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr;
+    gap:0.5rem; align-items:center; padding:0.35rem 0;
+  }
+  .cmp-row + .cmp-row { border-top:1px solid var(--border); }
+  .cmp-label { color:var(--text-mid); font-size:0.85rem; font-weight:600; }
+  .cmp-cell { text-align:center; }
+  .cmp-cell.empty { color:var(--text-faint); font-size:0.85rem; }
+  .cmp-val   { }              /* value block — the delta sits under it */
+  /* The delta slot reserves its line height even when empty. Without this the
+     Latest cell (no delta) is shorter than the QoQ/YoY cells, and align-items
+     :center then drops its score lower than theirs. */
+  .cmp-delta { min-height:1.25rem; }
+  .cmp-qhead { font-size:0.78rem; font-weight:700; text-align:center; margin-bottom:0.15rem; }
+  .q-latest { color:#a78bfa; }
+  .q-qoq    { color:#67e8f9; }
+  .q-yoy    { color:#86efac; }
+
+  /* "Why?" evidence disclosure under each score. Native <details>, so it
+     works on click and tap with no JS, on every screen size. */
+  .cmp-why { margin-top:0.35rem; text-align:left; }
+  .cmp-why summary {
+    cursor:pointer; list-style:none; font-size:0.72rem;
+    color:var(--text-faint); text-align:center; padding:0.15rem 0;
+  }
+  .cmp-why summary::-webkit-details-marker { display:none; }
+  .cmp-why summary::after { content:'ⓘ why'; }
+  .cmp-why[open] summary::after { content:'▾ hide'; color:var(--text-low); }
+  .cmp-why summary:hover { color:var(--accent); }
+  .why-body {
+    background:var(--bg-card-alt); border:1px solid var(--border);
+    border-left:3px solid var(--accent); border-radius:6px;
+    padding:0.55rem 0.65rem; margin-top:0.3rem;
+    font-size:0.78rem; line-height:1.45; color:var(--text-mid);
+  }
+  .why-summary { margin-bottom:0.35rem; }
+  .why-driver  { color:var(--text-low); font-size:0.75rem; }
+  .why-cite {
+    margin-top:0.4rem; padding-top:0.35rem; border-top:1px solid var(--border);
+    font-style:italic; color:var(--text-mid); font-size:0.76rem;
+  }
+  .why-meta { font-style:normal; color:var(--text-faint); font-size:0.68rem; margin-top:0.15rem; }
+  .why-link { color:#67e8f9; text-decoration:none; }
+
+  /* Mini bars used by the sub-dimension rows */
+  .cmp-bar-track { background:#0f172a; border-radius:3px; height:6px; margin-top:0.2rem; }
+  .cmp-bar-fill  { height:6px; border-radius:3px; }
+
+  /* ── Phones ─────────────────────────────────────────────────────────── */
+  @media (max-width: 640px) {
+
+    /* Comparison grid → stacked cards, one per metric */
+    .cmp-row {
+      display:block; border:1px solid var(--border); border-radius:10px;
+      background:var(--bg-card-alt); padding:0.7rem 0.8rem; margin-bottom:0.55rem;
+    }
+    .cmp-label {
+      display:block; font-size:0.95rem; color:var(--text-hi);
+      margin-bottom:0.5rem; padding-bottom:0.35rem; border-bottom:1px solid var(--border);
+    }
+    /* Each quarter on its own line: label · value · delta.
+       Fixed-width slots rather than space-between — otherwise the value's
+       x-position drifts with the length of its neighbours. */
+    .cmp-cell {
+      display:flex; align-items:center; gap:0.6rem;
+      padding:0.35rem 0; min-height:2.2rem;
+    }
+    .cmp-cell::before {
+      content: attr(data-q);
+      flex:0 0 7.5rem;                /* label slot */
+      font-size:0.78rem; font-weight:700;
+      color:var(--text-low); text-align:left;
+    }
+    .cmp-cell { flex-wrap:wrap; }         /* lets .cmp-why drop to its own line */
+    .cmp-val   { flex:1 1 auto; text-align:right; }
+    /* Mobile cells are flex ROWS, so the desktop min-height reservation isn't
+       needed — the fixed slot width does the aligning here. */
+    .cmp-delta { flex:0 0 3.6rem; text-align:right; font-size:0.8rem; min-height:0; }
+    .cmp-why   { flex:1 1 100%; margin-top:0.1rem; }
+    .cmp-why summary { text-align:right; padding:0.35rem 0; }   /* thumb target */
+    .cmp-cell[data-tone="latest"]::before { color:#a78bfa; }
+    .cmp-cell[data-tone="qoq"]::before    { color:#67e8f9; }
+    .cmp-cell[data-tone="yoy"]::before    { color:#86efac; }
+    .cmp-bar-track { flex:1 1 auto; min-width:60px; }
+    .cmp-qhead { display:none; }      /* headers move inline into each cell */
+
+    /* Per-quarter st.columns(3) blocks already carry their own labels —
+       they only need to stop being squeezed side by side. */
+    [data-testid="stHorizontalBlock"] { flex-wrap:wrap; gap:0.5rem; }
+    [data-testid="stColumn"] { min-width:100% !important; flex:1 1 100% !important; }
+
+    /* Reclaim horizontal space Streamlit reserves for desktop */
+    .block-container { padding:1rem 0.75rem 3rem !important; }
+    h1 { font-size:1.45rem !important; }
+    h2 { font-size:1.2rem !important; }
+    h3 { font-size:1.05rem !important; }
+    .section-help { font-size:0.78rem; line-height:1.45; }
+    .col-header  { font-size:0.8rem; }
+    .signal-card { padding:0.7rem; }
+    .legend-row  { gap:0.6rem; font-size:0.72rem; }
+
+    /* Tap targets */
+    .stButton button { min-height:2.75rem; font-size:0.95rem; }
+    [data-testid="stSidebar"] .stButton button { width:100%; }
+
+    /* Three redundant gauges stacked is noise — the score is already text
+       right above each one. Hide ONLY the gauge rows (tagged via
+       st.container(key="gauge-row-*")), never all Plotly charts: the Trend
+       tab's line charts are its entire content. */
+    .hide-mobile { display:none !important; }
+    [class*="st-key-gauge-row"] { display:none !important; }
+
+    /* Wide tables scroll instead of overflowing the viewport */
+    [data-testid="stDataFrame"] { overflow-x:auto; }
+  }
+
+  /* ── Small tablets ──────────────────────────────────────────────────── */
+  @media (min-width: 641px) and (max-width: 900px) {
+    .cmp-row { grid-template-columns:1.2fr 1fr 1fr 1fr; gap:0.35rem; }
+    .cmp-label { font-size:0.8rem; }
+    .block-container { padding-left:1.5rem !important; padding-right:1.5rem !important; }
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -203,6 +340,119 @@ def _score_cell(score: float | None, max_val: float = 10) -> str:
 
 def _pill(text: str, cls: str) -> str:
     return f"<span class='status-pill {cls}'>{text}</span>"
+
+
+# ── Responsive comparison grid ────────────────────────────────────────────────
+#
+# Renders label | Latest | QoQ | YoY as ONE html block rather than st.columns(),
+# so CSS can restack it into per-metric cards on a phone. See the .cmp rules in
+# the stylesheet. Each cell carries data-q (the quarter label) which the mobile
+# media query pulls out via ::before — that's what keeps a stacked cell readable
+# without duplicating the label in every row.
+
+_TONES = ("latest", "qoq", "yoy")
+_MARKS = {"latest": "📍", "qoq": "↔", "yoy": "📅"}
+
+
+def _cmp_cell(inner: str | None, tone: str, qlabel: str,
+              delta: str = "", why: str = "", empty: str = "No data") -> str:
+    """
+    One cell of a comparison row. `inner` None → muted placeholder.
+
+    The .cmp-delta slot is ALWAYS emitted, even empty. On mobile the cell is a
+    flex row (label · value · delta); if some cells had a delta and others
+    didn't, the child count would differ and space-between would park the
+    values at different x-positions. A constant slot keeps them aligned.
+    """
+    mark = _MARKS.get(tone, "")
+    q = f"{mark} {qlabel}".strip()
+    if inner is None:
+        return (f"<div class='cmp-cell empty' data-q='{q}' data-tone='{tone}'>"
+                f"<div class='cmp-val'>{empty}</div><div class='cmp-delta'></div></div>")
+    return (f"<div class='cmp-cell' data-q='{q}' data-tone='{tone}'>"
+            f"<div class='cmp-val'>{inner}</div><div class='cmp-delta'>{delta}</div>{why}</div>")
+
+
+def _cmp_row(label: str, cells: list[str], help_text: str = "") -> str:
+    """
+    One comparison row. `help_text` adds an ⓘ explaining WHAT the metric is —
+    a static definition, so a hover tooltip is fine (desktop only; the ⓘ is
+    simply inert on touch, which is acceptable for a definition).
+    For WHY a given number is what it is, see `why=` on _cmp_cell.
+    """
+    tip = ""
+    if help_text:
+        tip = f" <span class='info-tip' title='{html.escape(help_text, quote=True)}'>ⓘ</span>"
+    return f"<div class='cmp-row'><div class='cmp-label'>{label}{tip}</div>{''.join(cells)}</div>"
+
+
+def _why_html(summary: str = "", drivers: list | None = None,
+              citations: list | None = None, max_cites: int = 2) -> str:
+    """
+    The evidence behind a single number, as a <details> disclosure.
+
+    <details> rather than a title= tooltip or st.popover: it opens on click AND
+    tap so it works identically on desktop and phone, needs no JS, and — unlike
+    st.popover, which is a Streamlit element — it can live inside the html grid
+    right next to the number it explains. That adjacency is the whole point:
+    a score with its reasoning one tap away is the difference between a signal
+    and a number someone has to trust blindly.
+    """
+    parts = []
+    if summary:
+        parts.append(f"<div class='why-summary'>{html.escape(summary)}</div>")
+
+    for d in (drivers or [])[:3]:
+        text = d if isinstance(d, str) else (d.get("text") or d.get("driver") or str(d))
+        parts.append(f"<div class='why-driver'>• {html.escape(str(text))}</div>")
+
+    for c in (citations or [])[:max_cites]:
+        if not isinstance(c, dict):
+            continue
+        quote = (c.get("quote") or "").strip()
+        if not quote:
+            continue
+        meta = " · ".join(x for x in [
+            (c.get("doc_type") or "").replace("_", " ").title(),
+            c.get("quarter") or "",
+            c.get("speaker") or "",
+        ] if x)
+        url = c.get("source_url") or ""
+        link = (f" <a href='{html.escape(url, quote=True)}' target='_blank' "
+                f"class='why-link'>↗</a>") if url else ""
+        parts.append(
+            f"<div class='why-cite'>“{html.escape(quote)}”"
+            f"<div class='why-meta'>{html.escape(meta)}{link}</div></div>"
+        )
+
+    if not parts:
+        return ""
+    return ("<details class='cmp-why'><summary></summary>"
+            f"<div class='why-body'>{''.join(parts)}</div></details>")
+
+
+def _cmp_grid(rows: list[str]) -> str:
+    return f"<div class='cmp'>{''.join(rows)}</div>"
+
+
+def _cmp_render(rows: list[str]) -> None:
+    st.markdown(_cmp_grid(rows), unsafe_allow_html=True)
+
+
+def _bar_html(value: float | None) -> str | None:
+    """Sub-dimension mini bar: number + proportional fill. None → placeholder."""
+    if value is None:
+        return None
+    c = _color(value)
+    return (
+        f"<span style='color:{c};font-weight:700'>{value:.1f}</span>"
+        f"<div class='cmp-bar-track'><div class='cmp-bar-fill' "
+        f"style='background:{c};width:{value*10:.0f}%'></div></div>"
+    )
+
+
+def _big_text(text: str, colour: str) -> str:
+    return f"<div style='font-size:1.5rem;font-weight:800;color:{colour}'>{text}</div>"
 
 
 def _score_legend(max_val: float = 10) -> None:
@@ -635,10 +885,15 @@ st.markdown(f"# {active_ticker} — Signal Intelligence")
 st.divider()
 
 # Column headers
-_, c1, c2, c3 = st.columns([1.4, 1, 1, 1])
-with c1: st.markdown(f"<div class='col-header col-latest'>📍 Latest<br>{label_l}</div>", unsafe_allow_html=True)
-with c2: st.markdown(f"<div class='col-header col-qoq'>↔ QoQ vs<br>{label_q}</div>", unsafe_allow_html=True)
-with c3: st.markdown(f"<div class='col-header col-yoy'>📅 YoY vs<br>{label_y}</div>", unsafe_allow_html=True)
+# Column headers. Hidden on mobile — each cell labels its own quarter there.
+st.markdown(
+    "<div class='cmp'><div class='cmp-row'><div class='cmp-label'></div>"
+    f"<div class='cmp-qhead q-latest hide-mobile'>📍 Latest<br>{label_l}</div>"
+    f"<div class='cmp-qhead q-qoq hide-mobile'>↔ QoQ vs<br>{label_q}</div>"
+    f"<div class='cmp-qhead q-yoy hide-mobile'>📅 YoY vs<br>{label_y}</div>"
+    "</div></div>",
+    unsafe_allow_html=True,
+)
 
 st.markdown(
     "<div class='section-help'>"
@@ -719,41 +974,53 @@ with tab1:
     y_score = float(yc.get("score") or 0)
 
     # Score row
-    label_col, l_col, q_col, y_col = st.columns([1.4,1,1,1])
-    with label_col: st.markdown("**Score**")
-    with l_col:
-        st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#a78bfa;text-align:center'>📍 {label_l}</div>", unsafe_allow_html=True)
-        st.markdown(_score_cell(l_score), unsafe_allow_html=True)
-        st.markdown("<div style='height:1.15rem'></div>", unsafe_allow_html=True)
-        st.plotly_chart(_gauge(l_score, 10), use_container_width=True, key="chart_1")
-    with q_col:
-        if q_score:
-            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#67e8f9;text-align:center'>↔ {label_q}</div>", unsafe_allow_html=True)
-            st.markdown(_score_cell(q_score), unsafe_allow_html=True)
-            st.markdown(_delta_html(l_score, q_score), unsafe_allow_html=True)
-            st.plotly_chart(_gauge(q_score, 10), use_container_width=True, key="chart_2")
-        else:
-            st.caption("No data")
-    with y_col:
-        if y_score:
-            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#86efac;text-align:center'>📅 {label_y}</div>", unsafe_allow_html=True)
-            st.markdown(_score_cell(y_score), unsafe_allow_html=True)
-            st.markdown(_delta_html(l_score, y_score), unsafe_allow_html=True)
-            st.plotly_chart(_gauge(y_score, 10), use_container_width=True, key="chart_3")
-        else:
-            st.caption("No data")
+    _cmp_render([
+        _cmp_row("Score", [
+            _cmp_cell(_score_cell(l_score), "latest", label_l,
+                      why=_why_html(lc.get("summary",""), lc.get("drivers"), lc.get("citations"))),
+            _cmp_cell(_score_cell(q_score) if q_score else None, "qoq", label_q,
+                      delta=_delta_html(l_score, q_score) if q_score else "",
+                      why=_why_html(qc.get("summary",""), qc.get("drivers"), qc.get("citations"))),
+            _cmp_cell(_score_cell(y_score) if y_score else None, "yoy", label_y,
+                      delta=_delta_html(l_score, y_score) if y_score else "",
+                      why=_why_html(yc.get("summary",""), yc.get("drivers"), yc.get("citations"))),
+        ], help_text=(
+            "0–10 score for how confident management sounds in prepared remarks and Q&A. "
+            "Built from six sub-dimensions below — higher means more certainty, more concrete "
+            "numbers, less hedging and defensiveness. Tap 'why' under a score for the model's "
+            "reasoning and the quotes it drew on."
+        )),
+    ])
+
+    # Gauges stay native Plotly (can't live inside the html grid) and are
+    # hidden on phones by the stylesheet — the scores above already say it.
+    with st.container(key="gauge-row-confidence"):
+        # Leading spacer matches the grid's 1.4fr label column so each gauge
+        # lands under its own score.
+        _, g1, g2, g3 = st.columns([1.4, 1, 1, 1])
+        with g1: st.plotly_chart(_gauge(l_score, 10), use_container_width=True, key="chart_1")
+        with g2:
+            if q_score: st.plotly_chart(_gauge(q_score, 10), use_container_width=True, key="chart_2")
+        with g3:
+            if y_score: st.plotly_chart(_gauge(y_score, 10), use_container_width=True, key="chart_3")
 
     st.divider()
 
     # Sub-dimensions
     st.markdown("#### Sub-dimension Breakdown")
     dims = [
-        ("Confidence Level",  "confidence_level"),
-        ("Low Uncertainty",   "uncertainty_level"),
-        ("Not Defensive",     "defensiveness"),
-        ("Specificity",       "specificity"),
-        ("Consistency",       "consistency"),
-        ("Forward Strength",  "forward_strength"),
+        ("Confidence Level",  "confidence_level",
+         "Certainty of language vs. hedging. High = definite claims; low = 'we hope', 'should', 'aim to'."),
+        ("Low Uncertainty",   "uncertainty_level",
+         "Inverted: how FEW explicit uncertainty signals appear. High = little stated uncertainty."),
+        ("Not Defensive",     "defensiveness",
+         "Inverted: how little reactive or justifying tone there is, especially under Q&A pressure. High = not defensive."),
+        ("Specificity",       "specificity",
+         "Concrete numbers, dates and named drivers vs. vague language. High = management commits to specifics."),
+        ("Consistency",       "consistency",
+         "Alignment with what management said in prior quarters. Low = the story has changed."),
+        ("Forward Strength",  "forward_strength",
+         "Strength of positive forward-looking statements. High = confident, specific guidance about what's ahead."),
     ]
     # Only render sub-dimension bars if at least one has a real value
     # Show the sub-dimension section whenever there is an overall confidence score.
@@ -767,7 +1034,8 @@ with tab1:
             icon="ℹ️",
         )
     else:
-        for dim_name, dim_key in dims:
+        _rows = []
+        for dim_name, dim_key, dim_help in dims:
             _lv_raw = lc.get(dim_key)
             _qv_raw = qc.get(dim_key)
             _yv_raw = yc.get(dim_key)
@@ -776,60 +1044,12 @@ with tab1:
             qv = float(_qv_raw) if (_qv_raw is not None and float(_qv_raw) > 0) else None
             yv = float(_yv_raw) if (_yv_raw is not None and float(_yv_raw) > 0) else None
 
-            lbl, l_d, q_d, y_d = st.columns([1.4,1,1,1])
-            with lbl:
-                st.markdown(
-                    f"<span style='color:#94a3b8;font-size:0.85rem'>{dim_name}</span>",
-                    unsafe_allow_html=True,
-                )
-            with l_d:
-                if lv is not None:
-                    c = _color(lv)
-                    bar = (
-                        f"<div style='background:#0f172a;border-radius:3px;height:6px'>"
-                        f"<div style='background:{c};width:{lv*10:.0f}%;height:6px;border-radius:3px'></div></div>"
-                    )
-                    st.markdown(
-                        f"<span style='color:{c};font-weight:700'>{lv:.1f}</span> {bar}",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        "<span style='color:#475569' title='Re-run pipeline to score this dimension'>— </span>",
-                        unsafe_allow_html=True,
-                    )
-            with q_d:
-                if qv is not None and lv is not None:
-                    delta = lv - qv
-                    sym = "▲" if delta > 0 else "▼" if delta < 0 else "—"
-                    dc = "#22c55e" if delta > 0 else "#ef4444" if delta < 0 else "#94a3b8"
-                    st.markdown(
-                        f"<span style='color:#94a3b8'>{qv:.1f}</span> "
-                        f"<span style='color:{dc};font-size:0.8rem'>{sym}{abs(delta):.1f}</span>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown("<span style='color:#475569'>—</span>", unsafe_allow_html=True)
-            with y_d:
-                if yv is not None and lv is not None:
-                    delta = lv - yv
-                    sym = "▲" if delta > 0 else "▼" if delta < 0 else "—"
-                    dc = "#22c55e" if delta > 0 else "#ef4444" if delta < 0 else "#94a3b8"
-                    st.markdown(
-                        f"<span style='color:#94a3b8'>{yv:.1f}</span> "
-                        f"<span style='color:{dc};font-size:0.8rem'>{sym}{abs(delta):.1f}</span>",
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown("<span style='color:#475569'>—</span>", unsafe_allow_html=True)
-
-    # Show note if any dimension is missing
-    _missing_dims = [name for name, key in dims if not (lc.get(key) and float(lc.get(key, 0)) > 0)]
-    if _missing_dims and _has_subdim_data:
-        st.caption(
-            f"ℹ️ {len(_missing_dims)} dimension(s) not scored for this period "
-            "(shown as —). Re-run the pipeline to populate them."
-        )
+            _rows.append(_cmp_row(dim_name, [
+                _cmp_cell(_bar_html(lv), "latest", label_l, empty="—"),
+                _cmp_cell(_bar_html(qv), "qoq",    label_q, empty="—"),
+                _cmp_cell(_bar_html(yv), "yoy",    label_y, empty="—"),
+            ], help_text=dim_help))
+        _cmp_render(_rows)
 
     st.divider()
 
@@ -879,14 +1099,24 @@ with tab2:
     shift_map  = {"positive":"#22c55e","negative":"#ef4444","mixed":"#f97316","neutral":"#94a3b8"}
 
     # Shift row
-    lbl_col, l_col, q_col, y_col = st.columns([1.4,1,1,1])
-    with lbl_col: st.markdown("**Narrative Shift**")
-    for col, nd, lbl in [(l_col, ln, label_l), (q_col, qn, label_q), (y_col, yn, label_y)]:
-        with col:
-            shift = nd.get("overall_shift","—") or "—"
-            c = shift_map.get(shift, "#94a3b8")
-            st.markdown(f"<div style='text-align:center;font-size:1.5rem;font-weight:800;color:{c}'>{shift.upper()}</div>", unsafe_allow_html=True)
-            st.caption(lbl)
+    def _shift_cell(nd):
+        shift = nd.get("overall_shift","—") or "—"
+        return _big_text(shift.upper(), shift_map.get(shift, "#94a3b8"))
+
+    _cmp_render([
+        _cmp_row("Narrative Shift", [
+            _cmp_cell(_shift_cell(ln), "latest", label_l,
+                      why=_why_html(ln.get("summary",""), None, ln.get("citations"))),
+            _cmp_cell(_shift_cell(qn), "qoq",    label_q,
+                      why=_why_html(qn.get("summary",""), None, qn.get("citations"))),
+            _cmp_cell(_shift_cell(yn), "yoy",    label_y,
+                      why=_why_html(yn.get("summary",""), None, yn.get("citations"))),
+        ], help_text=(
+            "Direction the story is moving in, across the sector and macro themes management "
+            "discusses. Positive/negative/mixed/neutral is the net of themes accelerating, "
+            "emerging, fading, or turning risky versus the comparison quarter."
+        )),
+    ])
 
     st.divider()
 
@@ -1015,27 +1245,30 @@ with tab3:
     q_gs = float(qg.get("score") or 0)
     y_gs = float(yg.get("score") or 0)
 
-    lbl_col, l_col, q_col, y_col = st.columns([1.4,1,1,1])
-    with lbl_col: st.markdown("**Guidance Score**")
-    with l_col:
-        st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#a78bfa;text-align:center'>📍 {label_l}</div>", unsafe_allow_html=True)
-        st.markdown(_score_cell(l_gs, 100), unsafe_allow_html=True)
-        st.markdown("<div style='height:1.15rem'></div>", unsafe_allow_html=True)
-        st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_4")
-    with q_col:
-        if q_gs:
-            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#67e8f9;text-align:center'>↔ {label_q}</div>", unsafe_allow_html=True)
-            st.markdown(_score_cell(q_gs, 100), unsafe_allow_html=True)
-            st.markdown(_delta_html(l_gs, q_gs), unsafe_allow_html=True)
-            st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_5")
-        else: st.caption("No data")
-    with y_col:
-        if y_gs:
-            st.markdown(f"<div style='font-size:0.78rem;font-weight:700;color:#86efac;text-align:center'>📅 {label_y}</div>", unsafe_allow_html=True)
-            st.markdown(_score_cell(y_gs, 100), unsafe_allow_html=True)
-            st.markdown(_delta_html(l_gs, y_gs), unsafe_allow_html=True)
-            st.plotly_chart(_gauge(y_gs, 100), use_container_width=True, key="chart_6")
-        else: st.caption("No data")
+    _cmp_render([
+        _cmp_row("Guidance Score", [
+            _cmp_cell(_score_cell(l_gs, 100), "latest", label_l,
+                      why=_why_html(lg.get("summary",""), None, lg.get("citations"))),
+            _cmp_cell(_score_cell(q_gs, 100) if q_gs else None, "qoq", label_q,
+                      delta=_delta_html(l_gs, q_gs) if q_gs else "",
+                      why=_why_html(qg.get("summary",""), None, qg.get("citations"))),
+            _cmp_cell(_score_cell(y_gs, 100) if y_gs else None, "yoy", label_y,
+                      delta=_delta_html(l_gs, y_gs) if y_gs else "",
+                      why=_why_html(yg.get("summary",""), None, yg.get("citations"))),
+        ], help_text=(
+            "0–100 score for how reliably management delivers on its OWN guidance. Compares "
+            "guidance given in past quarters against results actually reported later. A low "
+            "score with repeated misses is flagged as serial-miss risk."
+        )),
+    ])
+
+    with st.container(key="gauge-row-guidance"):
+        _, g4, g5, g6 = st.columns([1.4, 1, 1, 1])
+        with g4: st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_4")
+        with g5:
+            if q_gs: st.plotly_chart(_gauge(q_gs, 100), use_container_width=True, key="chart_5")
+        with g6:
+            if y_gs: st.plotly_chart(_gauge(y_gs, 100), use_container_width=True, key="chart_6")
 
     st.divider()
 
@@ -1138,16 +1371,29 @@ with tab4:
 
     risk_dir_map = {"increasing":"#ef4444","stable":"#eab308","decreasing":"#22c55e"}
 
-    lbl_col, l_col, q_col, y_col = st.columns([1.4,1,1,1])
-    with lbl_col: st.markdown("**Risk Direction**")
-    for col, rd, lbl in [(l_col,lr,label_l),(q_col,qr,label_q),(y_col,yr_,label_y)]:
-        with col:
-            rdir = rd.get("overall_risk_direction","—") or "—"
-            rc = risk_dir_map.get(rdir,"#94a3b8")
-            st.markdown(f"<div style='text-align:center;font-size:1.5rem;font-weight:800;color:{rc}'>{rdir.upper()}</div>", unsafe_allow_html=True)
-            new_n = len(rd.get("new_risks",[]) or [])
-            esc_n = len(rd.get("escalating",[]) or [])
-            st.markdown(f"<div style='text-align:center;color:#94a3b8;font-size:0.8rem'>🆕{new_n} new · 📈{esc_n} esc</div>", unsafe_allow_html=True)
+    def _risk_cell(rd):
+        rdir = rd.get("overall_risk_direction","—") or "—"
+        new_n = len(rd.get("new_risks",[]) or [])
+        esc_n = len(rd.get("escalating",[]) or [])
+        return (
+            _big_text(rdir.upper(), risk_dir_map.get(rdir,"#94a3b8"))
+            + f"<div style='color:#94a3b8;font-size:0.8rem'>🆕{new_n} new · 📈{esc_n} esc</div>"
+        )
+
+    _cmp_render([
+        _cmp_row("Risk Direction", [
+            _cmp_cell(_risk_cell(lr),  "latest", label_l,
+                      why=_why_html(lr.get("summary",""), None, lr.get("citations"))),
+            _cmp_cell(_risk_cell(qr),  "qoq",    label_q,
+                      why=_why_html(qr.get("summary",""), None, qr.get("citations"))),
+            _cmp_cell(_risk_cell(yr_), "yoy",    label_y,
+                      why=_why_html(yr_.get("summary",""), None, yr_.get("citations"))),
+        ], help_text=(
+            "Whether the risk profile is getting worse, holding, or improving versus the "
+            "comparison quarter — based on risks newly raised, escalating in emphasis, or "
+            "fading from the disclosure."
+        )),
+    ])
 
     st.divider()
 

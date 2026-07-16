@@ -82,6 +82,7 @@ class VectorStore:
         ticker: str,
         n_results: int | None = None,
         quarter: str | None = None,
+        fiscal_year: int | str | None = None,
         doc_types: list[str] | None = None,
         sections: list[str] | None = None,
         management_only: bool = False,
@@ -90,6 +91,13 @@ class VectorStore:
         """
         Semantic retrieval with optional metadata filters.
         Returns list of (chunk, distance_score) sorted by relevance.
+
+        NOTE ON fiscal_year — filtering on `quarter` ALONE is a correctness bug:
+        quarter and fiscal_year are stored as separate metadata fields ("Q1" and
+        "2026"), so {"quarter": "Q1"} matches Q1 of EVERY year in the corpus.
+        A Q1-2026 query then returns Q1-2025 chunks, a YoY comparison ends up
+        scoring the same pooled evidence twice, and the delta collapses to 0.0.
+        Always pass fiscal_year alongside quarter for single-period retrieval.
         """
         n = n_results or settings.TOP_K_RETRIEVAL
         embedding = self._embed([query])[0]
@@ -101,6 +109,9 @@ class VectorStore:
             filters.append({"quarter": quarter})
         if quarters:
             filters.append({"quarter": {"$in": quarters}})
+        if fiscal_year is not None:
+            # Stored as a string at ingestion — compare like for like.
+            filters.append({"fiscal_year": str(fiscal_year)})
         if doc_types:
             filters.append({"doc_type": {"$in": doc_types}})
         if sections:
@@ -118,7 +129,13 @@ class VectorStore:
                 include=["documents", "metadatas", "distances"],
             )
         except Exception as e:
-            logger.warning(f"Query failed with filters, retrying bare: {e}")
+            # Falling back to a ticker-only filter silently widens the search
+            # across every quarter and year, which is how period-mixing slips
+            # through unnoticed. Log loudly enough to be greppable.
+            logger.warning(
+                f"Query failed with filters ({where_clause}), retrying with ticker only "
+                f"— results will NOT be period-filtered: {e}"
+            )
             results = self._col.query(
                 query_embeddings=[embedding],
                 n_results=min(n, self._col.count()),
@@ -164,7 +181,11 @@ class VectorStore:
             citations.append(Citation(
                 chunk_id=chunk.chunk_id,
                 doc_type=chunk.doc_type.value,
-                quarter=chunk.quarter,
+                # Full period, not a bare "Q1". A citation labelled only "Q1" is
+                # ambiguous across years — which is precisely why evidence being
+                # pooled from Q1-2025 into a Q1-2026 signal went unnoticed. The
+                # displayed provenance has to be specific enough to falsify.
+                quarter=f"{chunk.quarter} {chunk.fiscal_year}".strip(),
                 source_url=chunk.source_url,
                 speaker=chunk.speaker,
                 quote=quote,

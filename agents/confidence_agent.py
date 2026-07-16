@@ -78,6 +78,7 @@ class ConfidenceAgent(BaseAgent):
         quarter: str,
         fiscal_year: int,
         prior_quarter: str,
+        prior_year: int,
     ) -> ConfidenceSignal:
         logger.info(f"[ConfidenceAgent] Running for {ticker} {quarter} {fiscal_year}")
 
@@ -86,6 +87,7 @@ class ConfidenceAgent(BaseAgent):
             queries=self.EVIDENCE_QUERIES,
             ticker=ticker,
             quarter=quarter,
+            fiscal_year=fiscal_year,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             management_only=True,
             top_k_per_query=6,
@@ -94,6 +96,7 @@ class ConfidenceAgent(BaseAgent):
             queries=self.EVIDENCE_QUERIES,
             ticker=ticker,
             quarter=prior_quarter,
+            fiscal_year=prior_year,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             management_only=True,
             top_k_per_query=5,
@@ -106,7 +109,7 @@ class ConfidenceAgent(BaseAgent):
 
         user_prompt = f"""Company: {company} ({ticker})
 Current Quarter: {quarter} {fiscal_year}
-Prior Quarter: {prior_quarter}
+Prior Quarter: {prior_quarter} {prior_year}
 
 === CURRENT QUARTER EVIDENCE ===
 {current_evidence or "No current quarter evidence retrieved."}

@@ -351,6 +351,7 @@ class NarrativeAgent(BaseAgent):
         ticker: str, company: str,
         quarter: str, fiscal_year: int,
         prior_quarter: str,
+        prior_year: int,
         sector: str | None = None,
     ) -> NarrativeSignal:
         sector_key = sector if sector in SECTOR_TAXONOMY else _infer_sector(company, ticker)
@@ -360,12 +361,12 @@ class NarrativeAgent(BaseAgent):
         queries = _queries_for(sector_key)
 
         current_chunks = self.rag_retrieve(
-            queries=queries, ticker=ticker, quarter=quarter,
+            queries=queries, ticker=ticker, quarter=quarter, fiscal_year=fiscal_year,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             top_k_per_query=5,
         )
         prior_chunks = self.rag_retrieve(
-            queries=queries, ticker=ticker, quarter=prior_quarter,
+            queries=queries, ticker=ticker, quarter=prior_quarter, fiscal_year=prior_year,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             top_k_per_query=5,
         )
@@ -373,7 +374,7 @@ class NarrativeAgent(BaseAgent):
         citations = self.vs.as_citations(current_chunks[:8])
 
         user_prompt = f"""Company: {company} ({ticker})  |  Sector: {sector_label}
-Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter}
+Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter} {prior_year}
 
 === CURRENT QUARTER EVIDENCE ===
 {self.format_evidence(current_chunks[:12]) or "No current evidence."}

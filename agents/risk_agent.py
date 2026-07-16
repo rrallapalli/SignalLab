@@ -84,16 +84,17 @@ class RiskAgent(BaseAgent):
         ticker: str, company: str,
         quarter: str, fiscal_year: int,
         prior_quarter: str,
+        prior_year: int,
     ) -> RiskSignal:
         logger.info(f"[RiskAgent] Running for {ticker} {quarter} {fiscal_year}")
 
         current_chunks = self.rag_retrieve(
-            queries=self.RISK_QUERIES, ticker=ticker, quarter=quarter,
+            queries=self.RISK_QUERIES, ticker=ticker, quarter=quarter, fiscal_year=fiscal_year,
             sections=["risk_factors","prepared_remarks","qa_session"],
             top_k_per_query=5,
         )
         prior_chunks = self.rag_retrieve(
-            queries=self.RISK_QUERIES, ticker=ticker, quarter=prior_quarter,
+            queries=self.RISK_QUERIES, ticker=ticker, quarter=prior_quarter, fiscal_year=prior_year,
             sections=["risk_factors","prepared_remarks","qa_session"],
             top_k_per_query=5,
         )
@@ -101,7 +102,7 @@ class RiskAgent(BaseAgent):
         citations = self.vs.as_citations(current_chunks[:8])
 
         user_prompt = f"""Company: {company} ({ticker})
-Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter}
+Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter} {prior_year}
 
 === CURRENT QUARTER RISK EVIDENCE ===
 {self.format_evidence(current_chunks[:12]) or "No current risk evidence."}
