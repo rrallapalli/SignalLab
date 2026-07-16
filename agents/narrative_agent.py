@@ -420,9 +420,10 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
                 citations=citations,
             )
         except Exception as e:
-            logger.error(f"[NarrativeAgent] Failed: {e}")
-            return NarrativeSignal(
-                ticker=ticker, company=company, quarter=quarter,
-                fiscal_year=fiscal_year, shift_summary=f"Signal generation failed: {str(e)}",
-                citations=citations,
-            )
+            # Re-raised, not swallowed into a placeholder signal. Returning a
+            # NarrativeSignal here wrote a row into DuckDB for a quarter that was
+            # never analysed; it then appeared in the trend table and All Periods
+            # Summary as though it were a reading. The orchestrator already
+            # catches this per agent, records the error, and leaves it None.
+            logger.error(f"[NarrativeAgent] Failed for {ticker} {quarter} {fiscal_year}: {e}")
+            raise

@@ -50,7 +50,6 @@ Return ONLY valid JSON:
   "misses": 2,
   "in_line": 1,
   "withdrawals": 0,
-  "beat_rate": 0.50,
   "serial_miss_risk": false,
   "recent_pattern": ["beat","miss","beat","in_line","miss","beat"],
   "summary": "Guidance credibility score of 72/100. Management met or exceeded revenue guidance in 5 of 6 periods but margin guidance has been consistently optimistic, missing in 4 of 6 periods. Serial miss risk on margin guidance is elevated."
@@ -131,17 +130,40 @@ Score guidance credibility based on the full history available.
                     miss_reason=g.get("miss_reason","") or "",
                 ))
 
+            _beats   = safe_int(data.get("beats"))
+            _misses  = safe_int(data.get("misses"))
+            _in_line = safe_int(data.get("in_line"))
+            _tracked = _beats + _misses + _in_line
+
+            # Nothing tracked means guidance credibility was NOT assessed. The
+            # 0–100 rubric has no "unknown" band, so the model reaches for ~45
+            # ("Mixed, ~50% accuracy, some serial misses") and publishes a
+            # verdict on evidence it has just admitted it doesn't have — hence
+            # "45/100. There is insufficient data to evaluate guidance accuracy."
+            # Refuse: the orchestrator records it and the tab shows no data.
+            if _tracked == 0:
+                raise ValueError(
+                    "no guidance items found to assess — refusing to publish a "
+                    "credibility score with nothing to score against"
+                )
+
+            _score = safe_float(data.get("score"), None)
+            if _score is None:
+                raise ValueError("model returned no usable 'score'")
+
             return GuidanceSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
-                score=safe_float(data.get("score"), 50.0),
+                score=_score,
                 guidance_items=items,
                 periods_tracked=safe_int(data.get("periods_tracked")),
-                beats=safe_int(data.get("beats")),
-                misses=safe_int(data.get("misses")),
-                in_line=safe_int(data.get("in_line")),
+                beats=_beats,
+                misses=_misses,
+                in_line=_in_line,
                 withdrawals=safe_int(data.get("withdrawals")),
-                beat_rate=safe_float(data.get("beat_rate"), 0.5),
+                # Division, not judgement — we hold both operands. Asking the
+                # model for it invites a rate that contradicts its own counts.
+                beat_rate=round(_beats / _tracked, 3),
                 serial_miss_risk=bool(data.get("serial_miss_risk") or False),
                 recent_pattern=data.get("recent_pattern") or [],
                 summary=data.get("summary") or "",

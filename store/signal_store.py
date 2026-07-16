@@ -374,7 +374,10 @@ class SignalStore:
             except Exception: pass
 
         total_tracked = total_beats + total_misses + total_in_line
-        ytd_rate = total_beats / total_tracked if total_tracked > 0 else 0.0
+        # None, not 0.0. Nothing tracked is an ABSENCE of measurement; 0.0 reads
+        # as "beat none of them", which the dashboard then paints red — a
+        # damning verdict on a company whose guidance was simply never found.
+        ytd_rate = (total_beats / total_tracked) if total_tracked > 0 else None
 
         from collections import Counter
         miss_counts = Counter(
@@ -385,7 +388,8 @@ class SignalStore:
             "year": year, "quarters_covered": quarters_covered,
             "total_beats": total_beats, "total_misses": total_misses,
             "total_in_line": total_in_line, "total_tracked": total_tracked,
-            "ytd_beat_rate": round(ytd_rate, 3), "serial_misses": serial_misses,
+            "ytd_beat_rate": (round(ytd_rate, 3) if ytd_rate is not None else None),
+            "serial_misses": serial_misses,
         }
 
     def get_ytd_risks(self, ticker: str, year: int) -> dict:

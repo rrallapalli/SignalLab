@@ -145,9 +145,8 @@ Count mentions and assess severity. Focus on material changes.
                 citations=citations,
             )
         except Exception as e:
-            logger.error(f"[RiskAgent] Failed: {e}")
-            return RiskSignal(
-                ticker=ticker, company=company, quarter=quarter,
-                fiscal_year=fiscal_year, summary=f"Scoring failed: {str(e)}",
-                citations=citations,
-            )
+            # Re-raised, not swallowed. A stored RiskSignal with an empty
+            # overall_risk_direction is a row asserting a quarter was assessed
+            # for risk when it wasn't. The orchestrator handles agent failure.
+            logger.error(f"[RiskAgent] Failed for {ticker} {quarter} {fiscal_year}: {e}")
+            raise

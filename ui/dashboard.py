@@ -1226,7 +1226,13 @@ with tab3:
         _rate     = _ytd_guid["ytd_beat_rate"]
         _qtrs     = ", ".join(_ytd_guid["quarters_covered"])
         _serial   = _ytd_guid["serial_misses"]
-        _rate_color = "#22c55e" if _rate >= 0.7 else "#eab308" if _rate >= 0.5 else "#ef4444"
+        # _rate is None when no guidance items were tracked at all. Showing a
+        # red 0% there says "missed everything" when it means "measured nothing".
+        if _rate is None:
+            _rate_color, _rate_text = "#64748b", "—"
+        else:
+            _rate_color = "#22c55e" if _rate >= 0.7 else "#eab308" if _rate >= 0.5 else "#ef4444"
+            _rate_text  = f"{_rate:.0%}"
 
         _serial_html = (
             "<div style='color:#ef4444; font-size:0.82rem'>⚠️ Serial misses: "
@@ -1239,7 +1245,7 @@ with tab3:
             "<div>",
             "<div style='color:#64748b;font-size:0.75rem;text-transform:uppercase;",
             f"letter-spacing:0.08em;margin-bottom:0.2rem'>📅 YTD Guidance — {_ytd_yr} ({_qtrs})</div>",
-            f"<div style='font-size:1.6rem;font-weight:800;color:{_rate_color}'>{_rate:.0%}</div>",
+            f"<div style='font-size:1.6rem;font-weight:800;color:{_rate_color}'>{_rate_text}</div>",
             "</div>",
             "<div style='color:#94a3b8;font-size:0.88rem;line-height:1.8'>",
             f"<span style='color:#22c55e;font-weight:700'>✓ {_beats} beat</span> &nbsp;·&nbsp; ",
