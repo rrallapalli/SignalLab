@@ -307,6 +307,13 @@ For each theme:
 - Classify status: accelerating | emerging | stable | fading | newly_risky | resolved
 - Write one-line interpretation
 
+key_quotes MUST be copied VERBATIM, character for character, from the evidence
+above. Do not paraphrase, tidy, shorten, or compose them. If you cannot find an
+exact sentence supporting the theme, return an empty key_quotes list. Every quote
+is checked against the source text and silently dropped if it does not appear
+there — an invented quote will not reach the user, it will just cost the theme
+its evidence.
+
 Return ONLY valid JSON:
 {{
   "themes": [
@@ -389,22 +396,64 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
         try:
             data = await self.llm_reason(_build_system_prompt(sector_key), user_prompt)
 
+            # Belt and braces: an instruction is not a guarantee. Anything the
+            # model calls a quote is checked against the actual retrieved text
+            # and dropped if it isn't there. Citation.quote is extracted by code
+            # from chunk.text and is verbatim by construction; key_quotes come
+            # out of the model's JSON and are not.
+            _evidence_norm = " ".join(
+                (getattr(c, "text", "") or "") for c, _ in (current_chunks + prior_chunks)
+            )
+            _evidence_norm = " ".join(_evidence_norm.split()).lower()
+
+            def _verified_quotes(raw: list) -> list[str]:
+                out = []
+                for q in (raw or [])[:2]:
+                    if not isinstance(q, str):
+                        continue
+                    needle = " ".join(q.split()).lower().strip(' "\'“”')
+                    if len(needle) >= 15 and needle in _evidence_norm:
+                        out.append(q)
+                    else:
+                        logger.warning(
+                            f"[NarrativeAgent] Dropped unverifiable key_quote "
+                            f"(not found in source text): {q[:70]!r}"
+                        )
+                return out
+
             themes = []
             for t in data.get("themes", []):
-                status_str = t.get("status") or "stable"
-                try: status = ThemeStatus(status_str)
-                except: status = ThemeStatus.STABLE
+                # An unrecognised status is a parse failure, not a finding.
+                # Coercing it to STABLE asserted "this theme didn't move" —
+                # a verdict manufactured from a bad string.
+                status_str = (t.get("status") or "").strip().lower()
+                try:
+                    status = ThemeStatus(status_str)
+                except ValueError:
+                    logger.warning(
+                        f"[NarrativeAgent] Dropped theme {t.get('theme','?')!r}: "
+                        f"unrecognised status {status_str!r}"
+                    )
+                    continue
+                _cur_n  = safe_int(t.get("evidence_count_current"))
+                _prev_n = safe_int(t.get("evidence_count_previous"))
+                _cur_s  = safe_float(t.get("sentiment_current"))
+                _prev_s = safe_float(t.get("sentiment_previous"))
+
                 themes.append(ThemeSignal(
                     theme=t.get("theme","") or "",
                     status=status,
-                    evidence_count_current=safe_int(t.get("evidence_count_current")),
-                    evidence_count_previous=safe_int(t.get("evidence_count_previous")),
-                    count_change=safe_int(t.get("count_change")),
-                    sentiment_current=safe_float(t.get("sentiment_current")),
-                    sentiment_previous=safe_float(t.get("sentiment_previous")),
-                    sentiment_change=safe_float(t.get("sentiment_change")),
+                    evidence_count_current=_cur_n,
+                    evidence_count_previous=_prev_n,
+                    # Subtraction of two numbers the model already gave us.
+                    # Asking it to also do the arithmetic invites a delta that
+                    # contradicts its own operands.
+                    count_change=_cur_n - _prev_n,
+                    sentiment_current=_cur_s,
+                    sentiment_previous=_prev_s,
+                    sentiment_change=round(_cur_s - _prev_s, 3),
                     interpretation=t.get("interpretation","") or "",
-                    key_quotes=(t.get("key_quotes") or [])[:2],
+                    key_quotes=_verified_quotes(t.get("key_quotes")),
                 ))
 
             return NarrativeSignal(

@@ -51,7 +51,6 @@ Return ONLY valid JSON:
   "in_line": 1,
   "withdrawals": 0,
   "serial_miss_risk": false,
-  "recent_pattern": ["beat","miss","beat","in_line","miss","beat"],
   "summary": "Guidance credibility score of 72/100. Management met or exceeded revenue guidance in 5 of 6 periods but margin guidance has been consistently optimistic, missing in 4 of 6 periods. Serial miss risk on margin guidance is elevated."
 }
 
@@ -62,8 +61,33 @@ Scoring (0–100):
 - 25–44:  Frequent misses, credibility concerns
 - 0–24:   Systematic over-promising
 
-serial_miss_risk = true if the same metric has been missed 3+ consecutive periods.
+Do NOT return serial_miss_risk, beat_rate or recent_pattern — they are counted
+from the guidance_items you return, not judged. Focus on getting each item's
+metric, period, guidance, actual and outcome right.
 """
+
+
+def _serial_miss_metrics(items: list) -> list[str]:
+    """
+    Metrics this company has missed repeatedly.
+
+    ONE definition, used by both the agent flag and the YTD banner, which
+    previously disagreed: the prompt said "3+ consecutive periods" while
+    store.get_ytd_guidance() counted "2+ misses in total".
+
+    "Consecutive" is not honestly computable here — GuidanceItem.period is a
+    free-text label ("Q1 2026", "FY26 Q1", "next quarter"), so we cannot order
+    periods reliably enough to claim consecutiveness. Counting total misses per
+    metric is a claim the data actually supports; asserting consecutiveness from
+    unordered labels would be the same fabrication in a different costume.
+    """
+    from collections import Counter
+    counts = Counter(
+        (i.metric or "").strip().lower()
+        for i in items
+        if (i.outcome or "").lower() == "miss" and (i.metric or "").strip()
+    )
+    return sorted(m for m, c in counts.items() if c >= 2)
 
 
 class GuidanceAgent(BaseAgent):
@@ -151,6 +175,9 @@ Score guidance credibility based on the full history available.
             if _score is None:
                 raise ValueError("model returned no usable 'score'")
 
+            _serial_metrics = _serial_miss_metrics(items)
+            _recent_pattern = [i.outcome for i in items if i.outcome][:12]
+
             return GuidanceSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
@@ -164,8 +191,13 @@ Score guidance credibility based on the full history available.
                 # Division, not judgement — we hold both operands. Asking the
                 # model for it invites a rate that contradicts its own counts.
                 beat_rate=round(_beats / _tracked, 3),
-                serial_miss_risk=bool(data.get("serial_miss_risk") or False),
-                recent_pattern=data.get("recent_pattern") or [],
+                # Counted from the items, not asked of the model. The prompt
+                # previously defined this as "same metric missed 3+ CONSECUTIVE
+                # periods" while store.get_ytd_guidance() used "missed 2+ times
+                # in total" — two different meanings for one concept, both shown
+                # on screen. One definition now, in code: see _serial_miss_metrics.
+                serial_miss_risk=bool(_serial_metrics),
+                recent_pattern=_recent_pattern,
                 summary=data.get("summary") or "",
                 citations=citations,
             )

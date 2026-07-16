@@ -383,6 +383,8 @@ class SignalStore:
         miss_counts = Counter(
             item.get("metric","") for item in all_items if item.get("outcome","") == "miss"
         )
+        # Same rule as agents.guidance_agent._serial_miss_metrics — a metric
+        # missed 2+ times. Keep these two in step; they are both rendered.
         serial_misses = [m for m, c in miss_counts.items() if c >= 2]
         return {
             "year": year, "quarters_covered": quarters_covered,
