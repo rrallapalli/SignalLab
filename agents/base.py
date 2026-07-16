@@ -24,11 +24,15 @@ except ImportError:
     _RETRY_EXC = (Exception,)
 
 
-def safe_float(value: Any, default: float = 0.0) -> float:
+def safe_float(value: Any, default: float | None = 0.0) -> float | None:
     """
     dict.get(key, default) only falls back when the key is ABSENT — if the
     LLM returns the key with an explicit `null`, .get() still returns None
     and float(None) raises. Use this instead of float(data.get(...)).
+
+    Pass default=None for values where there is no honest fallback. A missing
+    score is not a zero and not a midpoint — it is an absent measurement, and
+    substituting a number for it publishes a figure no evidence supports.
     """
     if value is None:
         return default

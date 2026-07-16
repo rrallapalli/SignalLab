@@ -1487,7 +1487,19 @@ with tab5:
             for r in risk_all:
                 if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl: return r
             return {}
-        for cr in conf_history:
+        # conf_history is ordered newest-first; the delta for a row is its score
+        # minus the NEXT row's (the chronologically previous quarter). Computed
+        # here from real stored scores rather than read from the 'change' column,
+        # which the LLM used to invent — it produced deltas that contradicted the
+        # ones shown in the comparison view above.
+        for _i, cr in enumerate(conf_history):
+            _prev = conf_history[_i + 1] if _i + 1 < len(conf_history) else None
+            _cur_s  = cr.get("score")
+            _prev_s = _prev.get("score") if _prev else None
+            if _cur_s is None or _prev_s is None:
+                _dconf = "—"          # no prior period stored → no delta to show
+            else:
+                _dconf = f"{float(_cur_s) - float(_prev_s):+.1f}"
             lbl = f"{cr.get('quarter','')} {cr.get('fiscal_year','')}"
             gr  = next((r for r in guid_history if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl), {})
             nr  = next((r for r in narr_history if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl), {})
@@ -1496,7 +1508,7 @@ with tab5:
             all_rows.append({
                 "Quarter":    ("📍 " if current_lbl else "") + lbl,
                 "Confidence": f"{float(cr.get('score',0)):.1f}/10",
-                "Δ Conf":     f"{float(cr.get('change',0) or 0):+.1f}",
+                "Δ Conf":     _dconf,
                 "Tone":       (cr.get("tone","") or "").title(),
                 "Guidance":   f"{float(gr.get('score',0)):.0f}/100" if gr else "—",
                 "Narrative":  (nr.get("overall_shift","") or "").title() if nr else "—",

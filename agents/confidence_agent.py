@@ -34,8 +34,6 @@ Return ONLY valid JSON. No markdown. No explanation outside the JSON.
 Required schema:
 {
   "score": 7.2,
-  "previous_score": 7.8,
-  "change": -0.6,
   "confidence_level": 7.0,
   "uncertainty_level": 6.0,
   "defensiveness": 8.0,
@@ -119,16 +117,35 @@ Prior Quarter: {prior_quarter} {prior_year}
 
 Score management confidence for the CURRENT quarter versus the prior quarter.
 Extract specific language changes that drove any score movement.
+
+IMPORTANT — do NOT state, guess, or narrate a numeric score for the prior
+quarter. You have not been given it. Describe the change QUALITATIVELY, from
+the language itself ("hedging replaced firm commitments on pricing"), never as
+"increased from 7.2 to 7.5". The prior score is looked up from the database and
+the delta is computed arithmetically; any number you invent will contradict the
+figure shown next to your summary.
 """
 
         try:
             data = await self.llm_reason(SYSTEM_PROMPT, user_prompt)
+
+            # A signal with no score is not a signal. Defaulting to 5.0 here
+            # would publish a plausible mid-range number that no evidence
+            # supports; raising lets the orchestrator record an error and skip.
+            score = safe_float(data.get("score"), None)
+            if score is None:
+                raise ValueError("model returned no usable 'score'")
+
             return ConfidenceSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
-                score=safe_float(data.get("score"), 5.0),
-                previous_score=safe_float(data["previous_score"]) if data.get("previous_score") is not None else None,
-                change=safe_float(data["change"]) if data.get("change") is not None else None,
+                score=score,
+                # NOT from the LLM. It has no access to the stored prior score,
+                # so anything it returns here is invented — and the dashboard
+                # computes the real delta from actual scores anyway, which is how
+                # "increased from 7.2 to 7.5" ended up printed next to "— 0.0".
+                previous_score=None,
+                change=None,
                 confidence_level=safe_float(data.get("confidence_level"), 5.0),
                 uncertainty_level=safe_float(data.get("uncertainty_level"), 5.0),
                 defensiveness=safe_float(data.get("defensiveness"), 5.0),
@@ -141,9 +158,11 @@ Extract specific language changes that drove any score movement.
                 citations=citations,
             )
         except Exception as e:
-            logger.error(f"[ConfidenceAgent] Failed: {e}")
-            return ConfidenceSignal(
-                ticker=ticker, company=company, quarter=quarter,
-                fiscal_year=fiscal_year, score=5.0,
-                summary=f"Scoring failed: {str(e)}", citations=citations,
-            )
+            # Deliberately re-raised, not swallowed into a placeholder signal.
+            # Returning score=5.0 wrote a fabricated mid-range score into DuckDB
+            # that then plotted on the trend chart and fed delta maths — the
+            # "Scoring failed" summary underneath it fooled nobody looking at a
+            # big green gauge. The orchestrator already catches this per agent,
+            # records the error, and leaves the signal None. Let it.
+            logger.error(f"[ConfidenceAgent] Failed for {ticker} {quarter} {fiscal_year}: {e}")
+            raise

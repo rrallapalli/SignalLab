@@ -142,9 +142,9 @@ Score guidance credibility based on the full history available.
                 citations=citations,
             )
         except Exception as e:
-            logger.error(f"[GuidanceAgent] Failed: {e}")
-            return GuidanceSignal(
-                ticker=ticker, company=company, quarter=quarter,
-                fiscal_year=fiscal_year, score=50,
-                summary=f"Scoring failed: {str(e)}", citations=citations,
-            )
+            # Re-raised, not swallowed. score=50 published a fabricated
+            # "middling credibility" verdict on a company whose guidance was
+            # never actually assessed. The orchestrator catches this, records
+            # the error, and leaves the signal None.
+            logger.error(f"[GuidanceAgent] Failed for {ticker} {quarter} {fiscal_year}: {e}")
+            raise
