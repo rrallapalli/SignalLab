@@ -131,11 +131,31 @@ st.markdown("""
     background: var(--bg-card-alt); border-radius:8px; border:1px solid var(--border);
   }
 
-  /* Inline "ⓘ" hover tooltip — no JS needed, uses the title attribute */
+  /* Inline "ⓘ" tooltip.
+     Driven by a data-* attribute, NOT title=. The mobile cells already prove
+     data-* attributes survive Streamlit's html sanitiser (the quarter labels
+     render from attr(data-q)), whereas title= produced no tooltip at all.
+     This also gives a styled, instant tooltip instead of the browser's slow
+     default, and :focus makes it work on tap as well as hover. */
   .info-tip {
-    cursor: help; color: var(--text-low); font-size:0.82rem;
-    border-bottom: 1px dotted var(--text-faint);
+    position:relative; cursor:help; color:var(--text-low); font-size:0.8rem;
+    border-bottom:1px dotted var(--text-faint); outline:none;
   }
+  .info-tip:hover, .info-tip:focus { color:var(--accent); }
+  .info-tip::after {
+    content: attr(data-tip);
+    position:absolute; left:0; top:150%; z-index:9999;
+    width:max-content; max-width:min(300px, 70vw);
+    background:#080c18; border:1px solid var(--border);
+    border-left:3px solid var(--accent); border-radius:6px;
+    padding:0.55rem 0.7rem;
+    font-size:0.75rem; line-height:1.5; font-weight:400;
+    color:var(--text-mid); text-align:left; white-space:normal;
+    box-shadow:0 8px 24px rgba(0,0,0,0.6);
+    opacity:0; visibility:hidden; transition:opacity 0.12s ease;
+    pointer-events:none;
+  }
+  .info-tip:hover::after, .info-tip:focus::after { opacity:1; visibility:visible; }
 
   /* Small colour-coded legend chips explaining the gauge thresholds */
   .legend-row { display:flex; gap:1.1rem; flex-wrap:wrap; font-size:0.78rem; color: var(--text-low); margin: 0.2rem 0 0.8rem 0; }
@@ -375,14 +395,17 @@ def _cmp_cell(inner: str | None, tone: str, qlabel: str,
 
 def _cmp_row(label: str, cells: list[str], help_text: str = "") -> str:
     """
-    One comparison row. `help_text` adds an ⓘ explaining WHAT the metric is —
-    a static definition, so a hover tooltip is fine (desktop only; the ⓘ is
-    simply inert on touch, which is acceptable for a definition).
+    One comparison row. `help_text` adds an ⓘ explaining WHAT the metric is
+    (a static definition). Rendered as a CSS tooltip off a data-tip attribute
+    and shown on :hover or :focus, so it works on desktop and on tap.
     For WHY a given number is what it is, see `why=` on _cmp_cell.
     """
     tip = ""
     if help_text:
-        tip = f" <span class='info-tip' title='{html.escape(help_text, quote=True)}'>ⓘ</span>"
+        # data-tip, not title: title= gets stripped by Streamlit's sanitiser.
+        # tabindex makes it focusable, so a tap opens it on touch devices.
+        tip = (f" <span class='info-tip' tabindex='0' "
+               f"data-tip='{html.escape(help_text, quote=True)}'>ⓘ</span>")
     return f"<div class='cmp-row'><div class='cmp-label'>{label}{tip}</div>{''.join(cells)}</div>"
 
 
