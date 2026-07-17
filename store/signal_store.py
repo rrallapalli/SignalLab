@@ -5,6 +5,7 @@ DuckDB-backed time-series store for structured signals and source documents.
 
 from __future__ import annotations
 import hashlib
+import re
 import json
 from datetime import datetime
 from typing import Any
@@ -363,6 +364,80 @@ class SignalStore:
         return rows[0][0] if rows else None
 
     # ── Incremental scoring ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _json_cols(table: str) -> list[str]:
+        """
+        JSON columns for a table, read from SCHEMA itself.
+
+        Hand-listing these rots the moment a column is added: a missed column
+        stays a raw string, the model rejects it, and the period silently never
+        qualifies for reuse. (It did — 'risks' was missed on the first attempt.)
+        Deriving from the schema means the list cannot drift from the table.
+        """
+        m = re.search(
+            rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\);", DDL, re.S
+        )
+        if not m:
+            return []
+        return [
+            line.split()[0]
+            for line in m.group(1).strip().splitlines()
+            if len(line.split()) >= 2 and line.split()[1].upper().startswith("JSON")
+        ]
+
+    def _row_for_period(self, table: str, ticker: str, quarter: str,
+                        fiscal_year: int) -> dict | None:
+        cur = self._conn.execute(
+            f"SELECT * FROM {table} WHERE ticker = ? AND quarter = ? AND fiscal_year = ?",
+            [ticker, quarter, fiscal_year],
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        cols = [d[0] for d in cur.description]
+        d = dict(zip(cols, rows[0]))
+        for c in self._json_cols(table):
+            if isinstance(d.get(c), str):
+                try:
+                    d[c] = json.loads(d[c] or "null")
+                except json.JSONDecodeError:
+                    d[c] = None
+        return d
+
+    def get_period_signals(self, ticker: str, quarter: str, fiscal_year: int) -> dict:
+        """
+        Rehydrate the four stored signals for one period as model objects.
+
+        Used to reuse a period whose corpus hasn't changed rather than paying to
+        re-score it. Returns {"confidence": ConfidenceSignal|None, ...} — a kind
+        is None if its row is missing or no longer parses into the current model
+        (which is itself a signal that SIGNAL_VERSION should have been bumped).
+        """
+        from models import ConfidenceSignal, GuidanceSignal, NarrativeSignal, RiskSignal
+
+        spec = [
+            ("confidence", "confidence_signals", ConfidenceSignal),
+            ("narrative",  "narrative_signals",  NarrativeSignal),
+            ("guidance",   "guidance_signals",   GuidanceSignal),
+            ("risk",       "risk_signals",       RiskSignal),
+        ]
+        out: dict = {}
+        for key, table, cls in spec:
+            row = self._row_for_period(table, ticker, quarter, fiscal_year)
+            if not row:
+                out[key] = None
+                continue
+            try:
+                out[key] = cls(**row)
+            except Exception as e:   # noqa: BLE001 — a shape change, not a crash
+                logger.warning(
+                    f"[store] Stored {key} for {ticker} {quarter} {fiscal_year} no longer "
+                    f"fits the current model ({e}). Treating as absent so it re-scores."
+                )
+                out[key] = None
+        return out
+
 
     def corpus_fingerprint(
         self, ticker: str, quarter: str, fiscal_year: int,

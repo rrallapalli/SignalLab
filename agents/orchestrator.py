@@ -247,6 +247,35 @@ async def _run_signals_for_quarter(
             errors=errors,
         )
 
+    # ── Reuse this period if nothing that produced its signal has changed ────
+    #
+    # A re-run of Q1 2026 previously re-scored Q4 2025 and Q1 2025 from scratch
+    # every time — 3x the LLM cost for 1x of new information, overwriting
+    # identical answers via INSERT OR REPLACE. The fingerprint covers the
+    # documents, the model AND SIGNAL_VERSION, so a prompt or scoring fix still
+    # invalidates every period even though old filings never change.
+    effective_model = model or settings.OPENAI_MODEL
+    fingerprint = ss.corpus_fingerprint(ticker, quarter, year, effective_model, SIGNAL_VERSION)
+
+    if ss.is_signal_current(ticker, quarter, year, fingerprint):
+        stored = ss.get_period_signals(ticker, quarter, year)
+        if all(stored.get(k) is not None for k in ("confidence", "narrative", "guidance", "risk")):
+            logger.info(
+                f"[signals] {ticker} {label}: corpus, model and agent version unchanged "
+                f"— reusing stored signals (no LLM calls)"
+            )
+            return SignalBundle(
+                ticker=ticker, company=company,
+                quarter=quarter, fiscal_year=year,
+                confidence=stored["confidence"], narrative=stored["narrative"],
+                guidance=stored["guidance"], risk=stored["risk"],
+                errors=[],
+            )
+        logger.info(
+            f"[signals] {ticker} {label}: marked current but stored signals are "
+            f"incomplete — re-scoring."
+        )
+
     logger.info(f"[signals] {ticker} {label}: running agents ({chunk_count} chunks available)")
 
     conf_sig = narr_sig = guid_sig = risk_sig = None
@@ -283,6 +312,17 @@ async def _run_signals_for_quarter(
 
         # Small gap between agents to stay within rate limits
         await asyncio.sleep(0.4)
+
+    # Only record this period as scored if ALL FOUR agents succeeded. A partial
+    # run must stay un-marked so the next run retries it — caching a failure is
+    # how a transient rate-limit becomes a permanently missing signal.
+    if not errors and all(s is not None for s in (conf_sig, narr_sig, guid_sig, risk_sig)):
+        ss.mark_scored(ticker, quarter, year, fingerprint)
+    else:
+        logger.info(
+            f"[signals] {ticker} {label}: not marked current "
+            f"({len(errors)} error(s)) — will be retried on the next run."
+        )
 
     return SignalBundle(
         ticker=ticker, company=company,
