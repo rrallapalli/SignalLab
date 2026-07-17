@@ -4,6 +4,7 @@ DuckDB-backed time-series store for structured signals and source documents.
 """
 
 from __future__ import annotations
+import hashlib
 import json
 from datetime import datetime
 from typing import Any
@@ -103,6 +104,15 @@ CREATE TABLE IF NOT EXISTS ingested_documents (
     chunk_count  INTEGER,
     ingested_at  TIMESTAMP,
     raw_text     VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS signal_runs (
+    id            VARCHAR PRIMARY KEY,   -- ticker::quarter::fiscal_year
+    ticker        VARCHAR NOT NULL,
+    quarter       VARCHAR NOT NULL,
+    fiscal_year   INTEGER,
+    fingerprint   VARCHAR,               -- corpus + model + agent version
+    generated_at  TIMESTAMP
 );
 """
 
@@ -351,6 +361,64 @@ class SignalStore:
             "SELECT raw_text FROM ingested_documents WHERE doc_id = ?", [doc_id]
         ).fetchall()
         return rows[0][0] if rows else None
+
+    # ── Incremental scoring ───────────────────────────────────────────────────
+
+    def corpus_fingerprint(
+        self, ticker: str, quarter: str, fiscal_year: int,
+        model: str, signal_version: str,
+    ) -> str:
+        """
+        A stable hash of everything that determines a period's signal.
+
+        Deliberately NOT a timestamp: log_document() stamps ingested_at with
+        utcnow() on every run, so "any document newer than the signal" is always
+        true after a re-run and would never skip anything.
+
+        Includes more than the documents, because a stored signal is stale if
+        ANY input to it changed:
+
+          · doc_ids + chunk_counts — the evidence itself
+          · model                  — gpt-4o and gpt-4o-mini do not agree
+          · signal_version         — the agent logic
+
+        The last one is not optional. Q1 2025's filings have not changed since
+        2025, but the signal stored against them was built with pooled
+        cross-year evidence and an invented prior score. A fingerprint of the
+        documents alone would call that "unchanged" and skip it forever, quietly
+        preserving a wrong answer — which is the failure mode this whole codebase
+        keeps producing. Bump SIGNAL_VERSION and every stored signal re-scores.
+        """
+        rows = self._conn.execute("""
+            SELECT doc_id, chunk_count FROM ingested_documents
+            WHERE ticker = ? AND quarter = ? AND fiscal_year = ?
+            ORDER BY doc_id
+        """, [ticker, quarter, fiscal_year]).fetchall()
+
+        payload = "|".join(f"{d}:{c}" for d, c in rows)
+        payload += f"||model={model}||agents={signal_version}"
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+    def is_signal_current(
+        self, ticker: str, quarter: str, fiscal_year: int, fingerprint: str
+    ) -> bool:
+        """True if this period was already scored under identical conditions."""
+        rows = self._conn.execute(
+            "SELECT fingerprint FROM signal_runs WHERE id = ?",
+            [f"{ticker}::{quarter}::{fiscal_year}"],
+        ).fetchall()
+        return bool(rows) and rows[0][0] == fingerprint
+
+    def mark_scored(
+        self, ticker: str, quarter: str, fiscal_year: int, fingerprint: str
+    ) -> None:
+        """Record that this period was scored under these exact conditions."""
+        self._conn.execute("""
+            INSERT OR REPLACE INTO signal_runs
+                (id, ticker, quarter, fiscal_year, fingerprint, generated_at)
+            VALUES (?,?,?,?,?,?)
+        """, [f"{ticker}::{quarter}::{fiscal_year}", ticker, quarter,
+              fiscal_year, fingerprint, datetime.utcnow()])
 
     # ── YTD helpers ───────────────────────────────────────────────────────────
 

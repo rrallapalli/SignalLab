@@ -39,6 +39,25 @@ from models import SignalBundle
 
 # ── Quarter arithmetic ────────────────────────────────────────────────────────
 
+# ── Signal version ────────────────────────────────────────────────────────────
+#
+# BUMP THIS whenever a change would produce a different signal from identical
+# documents: prompts, scoring rubrics, retrieval filters, parsing, the schema.
+#
+# It is part of the corpus fingerprint, so bumping it invalidates every stored
+# signal and forces a re-score. Without it, incremental scoring would look at
+# Q1 2025 — whose filings have not changed since 2025 — and skip it forever,
+# preserving whatever the agents believed back then. A cache that cannot be
+# invalidated by a bug fix is a bug that cannot be fixed.
+#
+# History:
+#   2026-07-17.1  fiscal_year retrieval filter; priors/deltas computed not
+#                 asked; failures raise instead of scoring 5.0/45; guidance
+#                 periods as (quarter, year) pairs; key_quotes verified
+#                 against source text.
+SIGNAL_VERSION = "2026-07-17.1"
+
+
 def _prior_quarter(q: str, yr: int) -> tuple[str, int]:
     n = int(q[1])
     return (f"Q{n-1}", yr) if n > 1 else ("Q4", yr - 1)
