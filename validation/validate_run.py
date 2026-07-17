@@ -139,9 +139,23 @@ def _cite_period(c: dict) -> str:
 # ── Checks ───────────────────────────────────────────────────────────────────
 
 
+# Confidence, narrative and risk build citations from current_chunks only, so
+# every citation must name the signal's own period. GUIDANCE IS DIFFERENT BY
+# DESIGN: it retrieves across periods_to_compare because auditing "did they
+# deliver?" requires the guidance given in an EARLIER quarter alongside the
+# actuals reported in a LATER one. An earlier version of this check applied the
+# single-period rule to all four kinds and reported 16 false failures on real
+# data — the check was wrong, not the app.
+SINGLE_PERIOD_KINDS = {"confidence", "narrative", "risk"}
+
+
 def check_citation_periods(rows_by_kind: dict[str, list[dict]]) -> Result:
-    """Every citation must come from the period whose signal it justifies."""
-    bad, undated = [], 0
+    """Citations must come from a period the signal is entitled to cite."""
+    known_periods = {
+        _period(row) for rows in rows_by_kind.values() for row in rows
+    }
+    bad, undated, checked = [], 0, 0
+
     for kind, rows in rows_by_kind.items():
         for row in rows:
             want = _period(row)
@@ -152,17 +166,30 @@ def check_citation_periods(rows_by_kind: dict[str, list[dict]]) -> Result:
                 if not re.search(r"\b\d{4}\b", got):
                     undated += 1
                     continue
-                if got != want:
-                    bad.append(f"{kind} {want} cites evidence from {got}")
+                checked += 1
+                if kind in SINGLE_PERIOD_KINDS:
+                    if got != want:
+                        bad.append(f"{kind} {want} cites evidence from {got}")
+                else:
+                    # Multi-period agent: any period it compared is legitimate,
+                    # but evidence from outside this ticker's known periods is not.
+                    if known_periods and got not in known_periods:
+                        bad.append(
+                            f"{kind} {want} cites {got}, which is not among the "
+                            f"periods analysed for this ticker"
+                        )
 
     if bad:
         return Result(
             "Citation periods match their signal", FAIL,
-            f"{len(bad)} citation(s) drawn from a different period than the signal claims.",
+            f"{len(bad)} citation(s) drawn from a period the signal cannot justify.",
             bad,
             why="retrieval filtering on quarter without fiscal_year — 'Q1' matched "
                 "Q1 of every year, so Latest and YoY scored identical evidence.",
         )
+    if not checked:
+        return Result("Citation periods match their signal", SKIP,
+                      "No dated citations to check.")
     if undated:
         return Result(
             "Citation periods match their signal", WARN,
@@ -170,7 +197,8 @@ def check_citation_periods(rows_by_kind: dict[str, list[dict]]) -> Result:
             "These pre-date the fix; re-run the ticker.",
         )
     return Result("Citation periods match their signal", PASS,
-                  "Every citation names the same period as the signal it supports.")
+                  f"All {checked} citations come from a period their signal is entitled "
+                  f"to cite (guidance may span the periods it compares).")
 
 
 def check_periods_disjoint(conf_rows: list[dict]) -> Result:

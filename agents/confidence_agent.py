@@ -118,12 +118,18 @@ Prior Quarter: {prior_quarter} {prior_year}
 Score management confidence for the CURRENT quarter versus the prior quarter.
 Extract specific language changes that drove any score movement.
 
-IMPORTANT — do NOT state, guess, or narrate a numeric score for the prior
-quarter. You have not been given it. Describe the change QUALITATIVELY, from
-the language itself ("hedging replaced firm commitments on pricing"), never as
-"increased from 7.2 to 7.5". The prior score is looked up from the database and
-the delta is computed arithmetically; any number you invent will contradict the
-figure shown next to your summary.
+NEVER write a numeric score anywhere in "summary" or "drivers" — not the current
+score, not the prior one, not a delta. You are not given the prior quarter's
+score and cannot know it. The interface already shows both scores and computes
+the change arithmetically, so any number you write here will sit beside the real
+one and contradict it.
+
+  BAD:  "Confidence declined from 7.2 to 6.8 QoQ as management hedged on pricing."
+  GOOD: "Firm commitments on pricing gave way to hedging — 'we hope to hold
+         realisations' replaced last quarter's 'we will hold realisations'."
+
+Describe WHAT CHANGED IN THE LANGUAGE and quote the shift. Leave every number to
+the scoring fields.
 """
 
         try:
