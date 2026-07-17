@@ -17,10 +17,22 @@ __pycache__/
 
 # VS Code local settings
 .vscode/
-# Local data — never commit DB or vector store
-data/signals.duckdb
-data/chroma/
-data/*.log
+# Local data — never commit ANY of it.
+#
+# Ignore the whole directory rather than naming files: 'data/signals.duckdb'
+# matched the DB but not the .wal DuckDB writes beside it, so the write-ahead
+# log got committed. A tracked .wal is worse than a tracked DB — it's a partial
+# transaction log, and a fresh clone gets one with no database next to it, so
+# DuckDB replays an orphan WAL into an empty file. The PDF caches were exposed
+# the same way: nothing was stopping 'git add -A' committing them.
+#
+# Everything here is derived and regenerable — signals (DuckDB), vectors
+# (Chroma), and cached NSE/BSE PDFs. config.py creates the directories at
+# import, so none of it needs to be tracked.
+#
+# Derived does NOT mean disposable: signals cost real OpenAI spend to produce.
+# Back data/ up (see HOSTING.md); just don't back it up into git.
+data/
 
 # Signal output JSONs
 *.json
