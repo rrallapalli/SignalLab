@@ -1493,19 +1493,30 @@ with tab5:
             for r in risk_all:
                 if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl: return r
             return {}
-        # conf_history is ordered newest-first; the delta for a row is its score
-        # minus the NEXT row's (the chronologically previous quarter). Computed
-        # here from real stored scores rather than read from the 'change' column,
-        # which the LLM used to invent — it produced deltas that contradicted the
-        # ones shown in the comparison view above.
-        for _i, cr in enumerate(conf_history):
-            _prev = conf_history[_i + 1] if _i + 1 < len(conf_history) else None
-            _cur_s  = cr.get("score")
-            _prev_s = _prev.get("score") if _prev else None
-            if _cur_s is None or _prev_s is None:
-                _dconf = "—"          # no prior period stored → no delta to show
-            else:
-                _dconf = f"{float(_cur_s) - float(_prev_s):+.1f}"
+        # Δ vs the IMMEDIATELY PRECEDING quarter — computed from real stored
+        # scores, not the 'change' column the LLM used to invent.
+        #
+        # The next row in conf_history is NOT necessarily the previous quarter:
+        # MIN_CHUNKS_TO_SCORE skips sparse quarters, so the history has gaps.
+        # Subtracting the adjacent ROW would quietly present a two-quarter jump
+        # as a one-quarter delta. If the neighbour isn't the true prior period,
+        # show nothing rather than a number that means something else.
+        from agents.orchestrator import _prior_quarter
+
+        _by_period = {
+            f"{r.get('quarter','')} {r.get('fiscal_year','')}": r for r in conf_history
+        }
+        for cr in conf_history:
+            _cur_s = cr.get("score")
+            _dconf = "—"
+            try:
+                _pq, _py = _prior_quarter(cr.get("quarter", ""), int(cr.get("fiscal_year") or 0))
+                _prev = _by_period.get(f"{_pq} {_py}")
+                _prev_s = _prev.get("score") if _prev else None
+                if _cur_s is not None and _prev_s is not None:
+                    _dconf = f"{float(_cur_s) - float(_prev_s):+.1f}"
+            except (ValueError, TypeError):
+                pass
             lbl = f"{cr.get('quarter','')} {cr.get('fiscal_year','')}"
             gr  = next((r for r in guid_history if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl), {})
             nr  = next((r for r in narr_history if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl), {})
