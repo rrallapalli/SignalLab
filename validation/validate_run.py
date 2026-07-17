@@ -275,6 +275,54 @@ def check_quotes_verbatim(store: SignalStore, ticker: str,
                   f"All {checked} quotes found verbatim in the stored source text.")
 
 
+def check_documents_single_period(store: SignalStore, ticker: str) -> Result:
+    """
+    One document must belong to exactly ONE period.
+
+    Checks source_url, not quote text, deliberately: boilerplate ("this
+    presentation contains forward-looking statements", safe-harbour blocks)
+    legitimately repeats across quarters, so duplicate TEXT is not evidence of
+    anything. A duplicate URL is — the same PDF cannot be two quarters' filings.
+
+    This exists because the earlier checks all passed on data where it was
+    happening: _search_window extends each quarter by NSE_BSE_RESULT_LAG_DAYS,
+    so consecutive windows overlap ~89 days, and a document is labelled with the
+    quarter that was REQUESTED rather than the period it reports on. The same
+    call was filed as both Q4 2025 and Q1 2026 — and because _doc_id hashes the
+    quarter, it became two doc_ids, two chunk sets, and looked like two
+    independent pieces of evidence to every other check here.
+    """
+    docs = store.get_source_documents(ticker, limit=500)
+    by_url: dict[str, set] = {}
+    for d in docs:
+        url = (d.get("source_url") or "").strip()
+        if not url:
+            continue
+        by_url.setdefault(url, set()).add(f"{d.get('quarter')} {d.get('fiscal_year')}")
+
+    dupes = {u: p for u, p in by_url.items() if len(p) > 1}
+    if not by_url:
+        return Result("Each document belongs to one period", SKIP,
+                      "No source documents recorded.")
+    if dupes:
+        items = [
+            f"{sorted(periods)} ← same file: …{url[-58:]}"
+            for url, periods in list(dupes.items())
+        ]
+        return Result(
+            "Each document belongs to one period", FAIL,
+            f"{len(dupes)} document(s) filed under more than one period. Those "
+            f"quarters are scoring the same evidence twice, so their comparison "
+            f"is partly a quarter against itself.",
+            items,
+            why="_search_window overlaps consecutive quarters by ~89 days "
+                "(NSE_BSE_RESULT_LAG_DAYS) and q_label is the REQUESTED quarter, "
+                "not the document's own reporting period.",
+        )
+    return Result("Each document belongs to one period", PASS,
+                  f"All {len(by_url)} documents are filed under exactly one period.")
+
+
 def check_guidance_arithmetic(guid_rows: list[dict]) -> Result:
     """beat_rate and serial_miss_risk must follow from the counts."""
     problems = []
@@ -485,6 +533,7 @@ def validate(ticker: str, verbose: bool = False) -> Report:
     rep.add(check_citation_periods(rows_by_kind))
     rep.add(check_periods_disjoint(conf))
     rep.add(check_quotes_verbatim(store, ticker, rows_by_kind))
+    rep.add(check_documents_single_period(store, ticker))
     # ARITHMETIC
     rep.add(check_guidance_arithmetic(guid))
     rep.add(check_theme_arithmetic(narr))

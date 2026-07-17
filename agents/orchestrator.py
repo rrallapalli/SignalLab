@@ -55,7 +55,12 @@ from models import SignalBundle
 #                 asked; failures raise instead of scoring 5.0/45; guidance
 #                 periods as (quarter, year) pairs; key_quotes verified
 #                 against source text.
-SIGNAL_VERSION = "2026-07-17.1"
+#   2026-07-17.2  documents dated from their subject line, not the search
+#                 window. Overlapping windows had filed one earnings call as
+#                 both Q4 2025 and Q1 2026, so quarters scored duplicate
+#                 evidence. Every stored signal predates this and must
+#                 re-score — ingestion changed underneath them.
+SIGNAL_VERSION = "2026-07-17.2"
 
 
 def _prior_quarter(q: str, yr: int) -> tuple[str, int]:

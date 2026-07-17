@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import io
 from datetime import datetime, timedelta
 from typing import Optional
@@ -71,6 +72,110 @@ BSE_ATTACHMENT_BASES = (
 
 def _doc_id(ticker: str, doc_type: str, quarter: str, url: str) -> str:
     return hashlib.md5(f"{ticker}::{doc_type}::{quarter}::{url}".encode()).hexdigest()[:16]
+
+
+
+# ── Which period is a document actually ABOUT? ────────────────────────────────
+#
+# Not "which search window found it". _search_window extends each quarter by
+# NSE_BSE_RESULT_LAG_DAYS (results are announced after the quarter ends), so
+# consecutive windows overlap by ~89 days. Labelling a document with the
+# REQUESTED quarter therefore filed the same earnings call as both Q4 2025 and
+# Q1 2026 — and since _doc_id hashes the quarter, it became two documents, two
+# chunk sets, and two quarters scoring identical evidence.
+#
+# Derived, in order of confidence:
+#   1. an explicit "quarter ended <date>" in the subject   — unambiguous
+#   2. "Q<n> FY<yy>" in the subject                        — needs the fiscal map
+#   3. the most recently ENDED quarter before the event    — heuristic fallback
+#
+# Everything maps onto _quarter_bounds' CALENDAR-quarter convention, so the
+# labels stay consistent with the rest of the app.
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _calendar_quarter(d: datetime) -> tuple[str, int]:
+    return f"Q{(d.month - 1) // 3 + 1}", d.year
+
+
+def _period_from_subject(subject: str) -> tuple[str, int] | None:
+    """
+    Parse the reporting period out of an NSE/BSE announcement subject.
+
+    Only the MONTH and YEAR matter for a quarter, so the day is ignored — which
+    also sidesteps the ordering trap: Indian filings write both "quarter ended
+    June 30, 2025" and "quarter ended 30th June, 2025", and a day-first regex
+    reads the 30 in the first form as the year (→ 2030).
+    """
+    s = (subject or "").lower()
+
+    # Text following "…ended …" — the date lives in there in some order.
+    m = re.search(r"(?:quarter|period|year|qtr)[^.]{0,40}?end(?:ed|ing)?\s+(?:on\s+)?(.{0,28})", s)
+    if m:
+        tail = m.group(1)
+
+        # Month name anywhere in the tail + a 4-digit (or 2-digit) year
+        month = None
+        for name, idx in _MONTHS.items():
+            if re.search(rf"\b{name}[a-z]*\b", tail):
+                month = idx
+                break
+        if month:
+            ym = re.search(r"\b(\d{4})\b", tail) or re.search(r"[\s,'](\d{2})\b", tail)
+            if ym:
+                year = int(ym.group(1))
+                if year < 100:
+                    year += 2000
+                if 2000 <= year <= 2100:
+                    return _calendar_quarter(datetime(year, month, 1))
+
+        # Numeric: 31.12.2025 / 30-06-2025 / 31/03/26  (day first, Indian style)
+        dm = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b", tail)
+        if dm:
+            mon, yr = int(dm.group(2)), int(dm.group(3))
+            if yr < 100:
+                yr += 2000
+            if 1 <= mon <= 12 and 2000 <= yr <= 2100:
+                return _calendar_quarter(datetime(yr, mon, 1))
+
+    # "Q1 FY26" · "Q1 FY2026" — Indian fiscal year runs Apr–Mar, so fiscal
+    # Q1 FY26 = Apr–Jun 2025 = CALENDAR Q2 2025.
+    m = re.search(r"\bq([1-4])\s*(?:fy|f\.y\.?|fiscal)\s*[\s\-]?(\d{2,4})\b", s)
+    if m:
+        fq, fy_raw = int(m.group(1)), int(m.group(2))
+        fy = fy_raw + 2000 if fy_raw < 100 else fy_raw
+        start_month = 4 + (fq - 1) * 3
+        start_year = fy - 1
+        if start_month > 12:
+            start_month -= 12
+            start_year += 1
+        return _calendar_quarter(datetime(start_year, start_month, 1))
+
+    return None
+
+
+def _period_from_event_date(event_date: datetime | None) -> tuple[str, int] | None:
+    """
+    Fallback: results are published shortly AFTER the quarter they report on, so
+    the subject period is the most recently ENDED calendar quarter.
+    """
+    if not event_date:
+        return None
+    q_start_month = ((event_date.month - 1) // 3) * 3 + 1
+    prev_end = datetime(event_date.year, q_start_month, 1) - timedelta(days=1)
+    return _calendar_quarter(prev_end)
+
+
+def _document_period(subject: str, event_date: datetime | None) -> tuple[tuple[str, int] | None, str]:
+    p = _period_from_subject(subject)
+    if p:
+        return p, "subject"
+    p = _period_from_event_date(event_date)
+    if p:
+        return p, "event_date"
+    return None, "unknown"
 
 
 def _classify(subject: str, allowed: set[str]) -> Optional[DocumentType]:
@@ -267,6 +372,29 @@ async def fetch_documents(
         key = urls[0]
         if key in seen_urls:
             continue
+
+        # Which period is this document actually ABOUT? Consecutive search
+        # windows overlap by ~NSE_BSE_RESULT_LAG_DAYS, so the same filing turns
+        # up in two windows. Labelling it with the requested quarter filed one
+        # earnings call as BOTH Q4 2025 and Q1 2026 — two doc_ids, two chunk
+        # sets, two quarters silently scoring identical evidence.
+        #
+        # Annual reports cover a year, not a quarter, so this doesn't apply.
+        if dtype is not DocumentType.ANNUAL_REPORT:
+            period, how = _document_period(subject, event_date)
+            if period is None:
+                logger.debug(
+                    f"[fetch] Cannot date {subject[:60]!r} — keeping under the "
+                    f"requested {q_label} {yr} (unverified)."
+                )
+            elif period != (q_label, yr):
+                logger.debug(
+                    f"[fetch] Skipping {subject[:60]!r}: it reports on "
+                    f"{period[0]} {period[1]} (from {how}), not {q_label} {yr}. "
+                    f"The {period[0]} {period[1]} window will pick it up."
+                )
+                continue
+
         seen_urls.add(key)
         candidates.append({
             "urls": urls, "subject": subject, "doc_type": dtype,
