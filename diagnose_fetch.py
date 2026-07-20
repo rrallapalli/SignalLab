@@ -13,6 +13,9 @@ from datetime import datetime, timedelta
 p = argparse.ArgumentParser()
 p.add_argument("--ticker", required=True)
 p.add_argument("--company", required=True)
+p.add_argument("--scripcode", default=None,
+               help="BSE scrip code (e.g. 532540 for TCS). Bypasses the fuzzy "
+                    "getScripCode() name lookup, matching what the pipeline does.")
 args = p.parse_args()
 
 print("=" * 70)
@@ -53,8 +56,12 @@ scripcode = None
 try:
     from bse import BSE
     bse = BSE(download_folder="./data/bse_cache")
-    scripcode = bse.getScripCode(args.company)
-    print(f"✅ Resolved scrip code: {scripcode}")
+    if args.scripcode:
+        scripcode = args.scripcode
+        print(f"✅ Using scrip code (provided): {scripcode}")
+    else:
+        scripcode = bse.getScripCode(args.company)
+        print(f"✅ Resolved scrip code (fuzzy lookup): {scripcode}")
 except Exception as e:
     print(f"❌ BSE scrip code lookup failed: {e!r}")
 
