@@ -700,12 +700,22 @@ if run_btn:
     status_box = st.status("🔍 Fetching documents for 3 quarters…", expanded=True, state="running")
     progress   = st.progress(0, text="Starting…")
 
-    try:
-        with status_box:
-            st.write("📡 Fetching Latest, QoQ, and YoY documents in parallel…")
-            progress.progress(15, text="Fetching documents…")
+    # ── Live progress ─────────────────────────────────────────────────────────
+    # The pipeline runs in a worker thread and reports ordered stage events
+    # through a thread-safe queue. Streamlit widgets can ONLY be touched from
+    # this (the main) thread, so the worker never calls st.*; it only puts
+    # events on the queue, and the loop below drains them and updates the UI.
+    import queue
 
-            result = _run_async(run_comparison_pipeline(
+    events: "queue.Queue[tuple[str, dict]]" = queue.Queue()
+    outcome: dict = {"result": None, "error": None}
+    _SENTINEL = "__pipeline_finished__"
+
+    def _pipeline_worker():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            outcome["result"] = loop.run_until_complete(run_comparison_pipeline(
                 ticker=ticker_in, company=company_in,
                 quarter=quarter_val, year=year_val,
                 vs=vs, ss=ss,
@@ -713,12 +723,68 @@ if run_btn:
                 # process-wide singleton shared by every browser session, so one
                 # user's choice would change the model under another user's run.
                 model=model_choice,
+                # Fires on THIS worker thread → must only touch the queue.
+                progress=lambda ev, detail: events.put((ev, detail)),
             ))
-            progress.progress(85, text="Running signal agents…")
-            st.write(f"✅ {result['docs_ingested']} docs ingested across 3 quarters")
-            st.write(f"🧠 Signals: **{result['latest_label']}** (Latest) · "
-                     f"**{result['qoq_label']}** (QoQ) · **{result['yoy_label']}** (YoY)")
-            progress.progress(100, text="Done!")
+        except Exception as e:
+            outcome["error"] = e
+        finally:
+            loop.close()
+            events.put((_SENTINEL, {}))
+
+    try:
+        worker = threading.Thread(target=_pipeline_worker, daemon=True)
+        worker.start()
+
+        ingested = 0   # quarters ingested so far (for the progress bar)
+        scored   = 0   # quarters scored so far
+        with status_box:
+            while True:
+                ev, detail = events.get()          # blocks until the next stage
+                if ev == _SENTINEL:
+                    break
+
+                if ev == "pipeline_start":
+                    progress.progress(5, text="Starting…")
+                    status_box.update(
+                        label=f"🔍 {detail['ticker']} — {detail['latest']} · "
+                              f"{detail['qoq']} (QoQ) · {detail['yoy']} (YoY)"
+                    )
+                elif ev == "ingest_start":
+                    progress.progress(12, text="Fetching documents…")
+                    st.write("📡 Fetching Latest, QoQ, and YoY documents in parallel…")
+                elif ev == "quarter_ingested":
+                    ingested += 1
+                    progress.progress(12 + int(38 * ingested / 3), text="Ingesting…")
+                    icon = "✅" if detail["chunks"] > 0 else "⚪"
+                    st.write(f"{icon} {detail['label']} — "
+                             f"{detail['docs']} docs · {detail['chunks']} chunks")
+                elif ev == "ingest_done":
+                    progress.progress(50, text="Documents ingested")
+                    st.write(f"✅ {detail['total_docs']} docs · "
+                             f"{detail['total_chunks']} chunks ingested across 3 quarters")
+                elif ev == "signals_skipped":
+                    progress.progress(100, text="No usable evidence")
+                    st.write(f"⚠️ Signals skipped — {detail['reason']}")
+                elif ev == "signals_start":
+                    progress.progress(55, text="Running signal agents…")
+                    st.write("🧠 Generating signals — 4 agents × 3 quarters…")
+                elif ev == "quarter_scored":
+                    scored += 1
+                    progress.progress(55 + int(37 * scored / 3), text="Scoring…")
+                    icon = "✅" if detail["ok"] else "⚠️"
+                    st.write(f"{icon} Signals scored: {detail['label']}")
+                elif ev == "signals_done":
+                    progress.progress(95, text="Signals complete")
+                    st.write(f"✅ {detail['completed']}/{detail['total']} quarters scored")
+                elif ev == "pipeline_done":
+                    progress.progress(100, text="Done!")
+
+        worker.join()
+        if outcome["error"] is not None:
+            raise outcome["error"]
+
+        result = outcome["result"]
 
         status_box.update(
             label=f"✅ Complete — {result['latest_label']} vs {result['qoq_label']} vs {result['yoy_label']}",

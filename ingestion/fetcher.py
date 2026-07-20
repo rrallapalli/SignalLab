@@ -69,6 +69,26 @@ BSE_ATTACHMENT_BASES = (
     "https://www.bseindia.com/xml-data/corpfiling/AttachHis/",
 )
 
+# NSE trading symbol → BSE scrip code.
+#
+# bse.getScripCode() does a name-based fuzzy lookup that fails on common name
+# variants ("Infosys Ltd" vs the registered "Infosys Limited"), which silently
+# drops all BSE filings for the ticker. These codes are stable identifiers, so
+# resolving them from the symbol we already have is both correct and faster.
+# Extend as new tickers are tested; unknown symbols fall back to the fuzzy lookup.
+BSE_SCRIP_OVERRIDES: dict[str, str] = {
+    "INFY":       "500209",
+    "TCS":        "532540",
+    "RELIANCE":   "500325",
+    "HDFCBANK":   "500180",
+    "ICICIBANK":  "532174",
+    "SBIN":       "500112",
+    "HINDUNILVR": "500696",
+    "BHARTIARTL": "532454",
+    "ITC":        "500875",
+    "WIPRO":      "507685",
+}
+
 
 def _doc_id(ticker: str, doc_type: str, quarter: str, url: str) -> str:
     return hashlib.md5(f"{ticker}::{doc_type}::{quarter}::{url}".encode()).hexdigest()[:16]
@@ -279,7 +299,17 @@ async def _download_pdf_text(client: httpx.AsyncClient, urls: list[str]) -> str:
     """Try each candidate URL (BSE has both a 'live' and 'historical' path) until one works."""
     for url in urls:
         try:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25, follow_redirects=True)
+            resp = await client.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    # BSE's AttachLive/AttachHis endpoints 403 without a same-site
+                    # referer. Harmless for NSE URLs, which ignore it.
+                    "Referer": "https://www.bseindia.com/",
+                },
+                timeout=25,
+                follow_redirects=True,
+            )
             if resp.status_code != 200 or not resp.content:
                 continue
             reader = PdfReader(io.BytesIO(resp.content))
@@ -312,14 +342,24 @@ async def fetch_documents(
         windows.append((f"Q{pq}", pq, py))
 
     nse: Optional[NSE] = None
-    try:
-        nse = await asyncio.to_thread(NSE, download_folder=str(settings.NSE_CACHE_DIR))
-    except Exception as e:
-        logger.warning(f"NSE client init failed (cookie handshake blocked?) — NSE filings will be skipped: {e}")
+    for attempt in range(3):
+        try:
+            nse = await asyncio.to_thread(NSE, download_folder=str(settings.NSE_CACHE_DIR))
+            break
+        except Exception as e:
+            if attempt == 2:
+                logger.warning(
+                    f"NSE client init failed after 3 attempts (cookie handshake blocked?) "
+                    f"— NSE filings will be skipped: {e}"
+                )
+            else:
+                # Back off before retrying; concurrent handshakes from one IP
+                # are what NSE's bot protection throttles most aggressively.
+                await asyncio.sleep(2 * (attempt + 1))
 
     bse = BSE(download_folder=str(settings.BSE_CACHE_DIR))
 
-    scripcode = bse_scripcode
+    scripcode = bse_scripcode or BSE_SCRIP_OVERRIDES.get(ticker.upper())
     if scripcode is None:
         try:
             scripcode = await asyncio.to_thread(bse.getScripCode, company)

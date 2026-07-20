@@ -19,7 +19,7 @@ Key reliability improvements over v1:
 from __future__ import annotations
 import asyncio, operator
 from datetime import datetime
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Callable, Optional
 from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, END, START
@@ -35,6 +35,31 @@ from agents.narrative_agent import NarrativeAgent
 from agents.guidance_agent import GuidanceAgent
 from agents.risk_agent import RiskAgent
 from models import SignalBundle
+
+
+# ── Progress reporting ────────────────────────────────────────────────────────
+#
+# The pipeline reports coarse, ordered stages so a UI can show live progress.
+# `progress` is an optional callable(event: str, detail: dict) invoked from
+# whatever thread/loop the pipeline runs on — so a UI callback MUST be
+# thread-safe (e.g. push onto a queue and update widgets from the main thread).
+#
+# Event vocabulary (in emission order):
+#   pipeline_start   {ticker, latest, qoq, yoy}
+#   ingest_start     {quarters: [label, ...]}
+#   quarter_ingested {label, docs, chunks}         — one per quarter
+#   ingest_done      {total_docs, total_chunks}
+#   signals_skipped  {reason}                       — emitted iff no quarter had data
+#   signals_start    {quarters: [label, ...]}
+#   quarter_scored   {label, ok, errors}            — one per quarter
+#   signals_done     {completed, total}
+#   pipeline_done    {docs_ingested}
+
+ProgressFn = Callable[[str, dict], None]
+
+
+def _noop_progress(event: str, detail: dict) -> None:
+    pass
 
 
 # ── Quarter arithmetic ────────────────────────────────────────────────────────
@@ -123,17 +148,20 @@ MIN_CHUNKS_TO_SCORE = 5
 async def _ingest_quarter(
     ticker: str, company: str, quarter: str, year: int,
     vs: VectorStore, ss: SignalStore,
+    progress: ProgressFn = _noop_progress, label: str | None = None,
 ) -> tuple[int, int]:
     """
     Fetch + chunk + embed one quarter.
     Returns (doc_count, chunk_count).
     """
+    label = label or f"{quarter} {year}"
     try:
         docs = await fetch_documents(
             ticker, company, quarter, year, include_prior=False
         )
     except Exception as e:
         logger.error(f"[ingest] Fetch failed {quarter} {year}: {e}")
+        progress("quarter_ingested", {"label": label, "docs": 0, "chunks": 0})
         return 0, 0
 
     total_chunks = 0
@@ -154,10 +182,14 @@ async def _ingest_quarter(
             logger.warning(f"[ingest] Chunk/embed failed for {doc.doc_id}: {e}")
 
     logger.info(f"[ingest] {ticker} {quarter} {year}: {len(docs)} docs, {total_chunks} chunks")
+    progress("quarter_ingested", {"label": label, "docs": len(docs), "chunks": total_chunks})
     return len(docs), total_chunks
 
 
-async def ingest_all(state: ComparisonState, vs: VectorStore, ss: SignalStore) -> dict:
+async def ingest_all(
+    state: ComparisonState, vs: VectorStore, ss: SignalStore,
+    progress: ProgressFn = _noop_progress,
+) -> dict:
     """
     Ingest all three quarters in parallel (I/O bound — safe to parallelise).
     Tracks per-quarter chunk counts so agents can be skipped if empty.
@@ -173,9 +205,11 @@ async def ingest_all(state: ComparisonState, vs: VectorStore, ss: SignalStore) -
     logger.info(
         f"[ingest] {ticker} → {labels[0]} | {labels[1]} | {labels[2]}"
     )
+    progress("ingest_start", {"quarters": labels})
 
     results = await asyncio.gather(
-        *[_ingest_quarter(ticker, company, q, y, vs, ss) for q, y in quarters],
+        *[_ingest_quarter(ticker, company, q, y, vs, ss, progress, lbl)
+          for (q, y), lbl in zip(quarters, labels)],
         return_exceptions=True,
     )
 
@@ -198,6 +232,7 @@ async def ingest_all(state: ComparisonState, vs: VectorStore, ss: SignalStore) -
         logger.info(f"[ingest]   {label}: {count} chunks {status}")
 
     logger.success(f"[ingest] Total: {total_docs} docs, {total_chunks} chunks")
+    progress("ingest_done", {"total_docs": total_docs, "total_chunks": total_chunks})
     return {
         "docs_ingested":    total_docs,
         "chunks_by_quarter": chunks_by_quarter,
@@ -338,7 +373,10 @@ async def _run_signals_for_quarter(
     )
 
 
-async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalStore) -> dict:
+async def run_all_signals(
+    state: ComparisonState, vs: VectorStore, ss: SignalStore,
+    progress: ProgressFn = _noop_progress,
+) -> dict:
     """
     Run signals for all three quarters with staggered starts.
     Quarters are staggered (not fully parallel) to spread LLM load:
@@ -357,37 +395,59 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
     ]
     model = state.get("model")   # per-run, not global
 
+    labels = [
+        f"{state['latest_q']} {state['latest_yr']}",
+        f"{state['qoq_q']} {state['qoq_yr']}",
+        f"{state['yoy_q']} {state['yoy_yr']}",
+    ]
+    progress("signals_start", {"quarters": labels})
+
+    def _emit_scored(label: str, bundle) -> None:
+        # Called as each quarter's agents finish, regardless of gather ordering.
+        ok = not isinstance(bundle, Exception) and not getattr(bundle, "errors", None)
+        errs = (
+            [str(bundle)] if isinstance(bundle, Exception)
+            else list(getattr(bundle, "errors", []) or [])
+        )
+        progress("quarter_scored", {"label": label, "ok": ok, "errors": errs})
+
     async def _run_latest():
-        return await _run_signals_for_quarter(
+        b = await _run_signals_for_quarter(
             ticker, company,
             state["latest_q"], state["latest_yr"],
             state["qoq_q"], state["qoq_yr"],
             all_periods,
-            chunks.get(f"{state['latest_q']} {state['latest_yr']}", 0),
+            chunks.get(labels[0], 0),
             vs, ss, model,
         )
+        _emit_scored(labels[0], b)
+        return b
 
     async def _run_qoq():
         await asyncio.sleep(1.0)   # stagger start
-        return await _run_signals_for_quarter(
+        b = await _run_signals_for_quarter(
             ticker, company,
             state["qoq_q"], state["qoq_yr"],
             *_prior_quarter(state["qoq_q"], state["qoq_yr"]),
             all_periods,
-            chunks.get(f"{state['qoq_q']} {state['qoq_yr']}", 0),
+            chunks.get(labels[1], 0),
             vs, ss, model,
         )
+        _emit_scored(labels[1], b)
+        return b
 
     async def _run_yoy():
         await asyncio.sleep(2.0)   # stagger start
-        return await _run_signals_for_quarter(
+        b = await _run_signals_for_quarter(
             ticker, company,
             state["yoy_q"], state["yoy_yr"],
             *_prior_quarter(state["yoy_q"], state["yoy_yr"]),
             all_periods,
-            chunks.get(f"{state['yoy_q']} {state['yoy_yr']}", 0),
+            chunks.get(labels[2], 0),
             vs, ss, model,
         )
+        _emit_scored(labels[2], b)
+        return b
 
     logger.info(f"[signals] Running 3 quarters (staggered) for {ticker}")
     latest_b, qoq_b, yoy_b = await asyncio.gather(
@@ -407,15 +467,16 @@ async def run_all_signals(state: ComparisonState, vs: VectorStore, ss: SignalSto
         return b.model_dump(mode="json")
 
     result = {
-        "latest_bundle": _safe_dump(latest_b, f"{state['latest_q']} {state['latest_yr']}"),
-        "qoq_bundle":    _safe_dump(qoq_b,    f"{state['qoq_q']} {state['qoq_yr']}"),
-        "yoy_bundle":    _safe_dump(yoy_b,     f"{state['yoy_q']} {state['yoy_yr']}"),
+        "latest_bundle": _safe_dump(latest_b, labels[0]),
+        "qoq_bundle":    _safe_dump(qoq_b,    labels[1]),
+        "yoy_bundle":    _safe_dump(yoy_b,    labels[2]),
         "current_node":  "signals_done",
         "errors":        errors,
     }
 
     completed = sum(1 for k in ["latest_bundle","qoq_bundle","yoy_bundle"] if result[k])
     logger.success(f"[signals] {ticker}: {completed}/3 quarters completed")
+    progress("signals_done", {"completed": completed, "total": 3})
     return result
 
 
@@ -434,16 +495,22 @@ def _has_any_chunks(state: ComparisonState) -> str:
     return "no_data"
 
 
-def build_graph(vs: VectorStore, ss: SignalStore):
-    async def _ingest(state):  return await ingest_all(state, vs, ss)
-    async def _signals(state): return await run_all_signals(state, vs, ss)
+def build_graph(vs: VectorStore, ss: SignalStore, progress: ProgressFn = _noop_progress):
+    async def _ingest(state):  return await ingest_all(state, vs, ss, progress)
+    async def _signals(state): return await run_all_signals(state, vs, ss, progress)
+
+    def _route(state: ComparisonState) -> str:
+        decision = _has_any_chunks(state)
+        if decision == "no_data":
+            progress("signals_skipped", {"reason": "no quarter reached the minimum chunk threshold"})
+        return decision
 
     g = StateGraph(ComparisonState)
     g.add_node("ingest",  _ingest)
     g.add_node("signals", _signals)
     g.add_edge(START, "ingest")
     g.add_conditional_edges(
-        "ingest", _has_any_chunks, {"ok": "signals", "no_data": END}
+        "ingest", _route, {"ok": "signals", "no_data": END}
     )
     g.add_edge("signals", END)
     return g.compile()
@@ -459,7 +526,9 @@ async def run_comparison_pipeline(
     vs: VectorStore | None = None,
     ss: SignalStore | None = None,
     model: str | None = None,
+    progress: ProgressFn | None = None,
 ) -> dict:
+    progress = progress or _noop_progress
     if vs is None: vs = VectorStore()
     if ss is None: ss = SignalStore()
 
@@ -469,8 +538,12 @@ async def run_comparison_pipeline(
         f"Pipeline: {ticker} | "
         f"Latest={lq} {ly} | QoQ={qq} {qy} | YoY={yq} {yy}"
     )
+    progress("pipeline_start", {
+        "ticker": ticker.upper(),
+        "latest": f"{lq} {ly}", "qoq": f"{qq} {qy}", "yoy": f"{yq} {yy}",
+    })
 
-    graph = build_graph(vs, ss)
+    graph = build_graph(vs, ss, progress)
 
     initial: ComparisonState = {
         "ticker":  ticker.upper(),
@@ -493,6 +566,7 @@ async def run_comparison_pipeline(
         node = next(iter(chunk))
         final.update(chunk[node])
 
+    progress("pipeline_done", {"docs_ingested": final.get("docs_ingested", 0)})
     return {
         "latest":        final.get("latest_bundle"),
         "qoq":           final.get("qoq_bundle"),
