@@ -26,7 +26,7 @@ from langgraph.graph import StateGraph, END, START
 from loguru import logger
 
 from config import settings
-from ingestion.fetcher import fetch_documents
+from ingestion.fetcher import fetch_all_periods
 from ingestion.chunker import chunk_document
 from store.vector_store import VectorStore
 from store.signal_store import SignalStore
@@ -145,25 +145,17 @@ class ComparisonState(TypedDict):
 MIN_CHUNKS_TO_SCORE = 5
 
 
-async def _ingest_quarter(
-    ticker: str, company: str, quarter: str, year: int,
+async def _embed_period_docs(
+    docs: list, quarter: str, year: int,
     vs: VectorStore, ss: SignalStore,
     progress: ProgressFn = _noop_progress, label: str | None = None,
 ) -> tuple[int, int]:
     """
-    Fetch + chunk + embed one quarter.
-    Returns (doc_count, chunk_count).
+    Chunk + embed already-fetched documents for one period.
+    Returns (doc_count, chunk_count). Fetching happens once, upstream, in
+    fetch_all_periods — so a given PDF can only ever reach one period here.
     """
     label = label or format_period(quarter, year)
-    try:
-        docs = await fetch_documents(
-            ticker, company, quarter, year, include_prior=False
-        )
-    except Exception as e:
-        logger.error(f"[ingest] Fetch failed {quarter} {year}: {e}")
-        progress("quarter_ingested", {"label": label, "docs": 0, "chunks": 0})
-        return 0, 0
-
     total_chunks = 0
     for doc in docs:
         try:
@@ -181,7 +173,7 @@ async def _ingest_quarter(
         except Exception as e:
             logger.warning(f"[ingest] Chunk/embed failed for {doc.doc_id}: {e}")
 
-    logger.info(f"[ingest] {ticker} {quarter} {year}: {len(docs)} docs, {total_chunks} chunks")
+    logger.info(f"[ingest] {label}: {len(docs)} docs, {total_chunks} chunks")
     progress("quarter_ingested", {"label": label, "docs": len(docs), "chunks": total_chunks})
     return len(docs), total_chunks
 
@@ -191,8 +183,13 @@ async def ingest_all(
     progress: ProgressFn = _noop_progress,
 ) -> dict:
     """
-    Ingest all three quarters in parallel (I/O bound — safe to parallelise).
-    Tracks per-quarter chunk counts so agents can be skipped if empty.
+    Ingest all three periods from a SINGLE fetch pass.
+
+    fetch_all_periods pulls one wide NSE/BSE window covering every requested
+    period and buckets each unique document by the period it is actually about,
+    so a filing can never land in two quarters (the old per-quarter fetch calls
+    each had their own overlapping window + dedupe set, which let an undateable
+    PDF be kept twice). Chunk/embed then runs per bucket.
     """
     ticker, company = state["ticker"], state["company"]
     quarters = [
@@ -200,33 +197,43 @@ async def ingest_all(
         (state["qoq_q"],    state["qoq_yr"]),
         (state["yoy_q"],    state["yoy_yr"]),
     ]
-    labels = [format_period(q, y) for q, y in quarters]
+    labels = {p: format_period(*p) for p in quarters}
 
-    logger.info(
-        f"[ingest] {ticker} → {labels[0]} | {labels[1]} | {labels[2]}"
-    )
-    progress("ingest_start", {"quarters": labels})
+    logger.info(f"[ingest] {ticker} → " + " | ".join(labels[p] for p in quarters))
+    progress("ingest_start", {"quarters": [labels[p] for p in quarters]})
 
-    results = await asyncio.gather(
-        *[_ingest_quarter(ticker, company, q, y, vs, ss, progress, lbl)
-          for (q, y), lbl in zip(quarters, labels)],
-        return_exceptions=True,
-    )
+    # One fetch for all periods.
+    try:
+        buckets = await fetch_all_periods(ticker, company, quarters)
+    except Exception as e:
+        logger.error(f"[ingest] Fetch failed: {e}")
+        buckets = {p: [] for p in quarters}
+        # Still emit per-quarter events so the UI resolves each stage.
+        for p in quarters:
+            progress("quarter_ingested", {"label": labels[p], "docs": 0, "chunks": 0})
+        progress("ingest_done", {"total_docs": 0, "total_chunks": 0})
+        return {
+            "docs_ingested": 0, "chunks_by_quarter": {labels[p]: 0 for p in quarters},
+            "current_node": "ingested", "errors": [f"fetch: {e}"],
+        }
 
+    # Chunk/embed per bucket. Sequential keeps DuckDB's single writer happy and
+    # preserves the per-quarter progress cadence the dashboard renders.
     total_docs = 0
     chunks_by_quarter: dict[str, int] = {}
     errors: list[str] = []
-
-    for label, r in zip(labels, results):
-        if isinstance(r, Exception):
-            errors.append(f"ingest {label}: {r}")
+    for p in quarters:
+        label = labels[p]
+        try:
+            d, c = await _embed_period_docs(buckets.get(p, []), p[0], p[1], vs, ss, progress, label)
+            total_docs += d
+            chunks_by_quarter[label] = c
+        except Exception as e:
+            errors.append(f"ingest {label}: {e}")
             chunks_by_quarter[label] = 0
-        else:
-            total_docs += r[0]
-            chunks_by_quarter[label] = r[1]
+            progress("quarter_ingested", {"label": label, "docs": 0, "chunks": 0})
 
     total_chunks = sum(chunks_by_quarter.values())
-
     for label, count in chunks_by_quarter.items():
         status = "✅" if count >= MIN_CHUNKS_TO_SCORE else "⚠️ too few"
         logger.info(f"[ingest]   {label}: {count} chunks {status}")

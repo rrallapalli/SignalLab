@@ -341,11 +341,41 @@ async def _download_pdf_text(client: httpx.AsyncClient, urls: list[str]) -> str:
     return ""
 
 
-async def fetch_documents(
-    ticker: str, company: str, quarter: str, year: int,
-    doc_types: list[str] | None = None, include_prior: bool = True,
+# Document-type ranking, shared by the single-pass fetch. Preferred types first,
+# then recency, when trimming to NSE_BSE_MAX_DOCS_PER_QUARTER per bucket.
+_DTYPE_PRIORITY = {
+    DocumentType.EARNINGS_CALL: 0, DocumentType.INVESTOR_PRESENTATION: 1,
+    DocumentType.PRESS_RELEASE: 2, DocumentType.ANNUAL_REPORT: 3,
+    DocumentType.MANAGEMENT_COMMENTARY: 4,
+}
+
+
+async def fetch_all_periods(
+    ticker: str, company: str,
+    periods: list[tuple[str, int]],
+    doc_types: list[str] | None = None,
     bse_scripcode: str | None = None,
-) -> list[SourceDocument]:
+) -> dict[tuple[str, int], list[SourceDocument]]:
+    """
+    Single-pass fetch for a set of FISCAL periods, bucketed by the period each
+    document is ACTUALLY about.
+
+    Why one pass instead of per-quarter calls: the old code called fetch per
+    quarter, each with its own overlapping ±lag window and its own url-dedupe
+    set. A filing that no subject-date parser could place ("undateable") was
+    kept under whichever *requested* quarter's window found it — and since two
+    adjacent windows overlap by ~NSE_BSE_RESULT_LAG_DAYS, the SAME pdf was kept
+    by two separate calls that never shared a dedupe set. That is the "one file,
+    two periods" the validator caught.
+
+    Here every unique PDF is seen exactly once, dated exactly once via
+    _document_period, and dropped into exactly one bucket — so double-counting is
+    structurally impossible, not merely filtered. Each PDF is also downloaded
+    once rather than once per overlapping window.
+
+    Returns {(quarter, fiscal_year): [SourceDocument, ...]} for every requested
+    period (empty list if a period had no documents).
+    """
     if doc_types is None:
         doc_types = list(DEFAULT_DOC_TYPES)
     doc_types_set = set(doc_types)
@@ -353,11 +383,18 @@ async def fetch_documents(
         logger.debug("news_article/broker_note are not available from NSE/BSE filings; skipping those types.")
         doc_types_set -= {"news_article", "broker_note"}
 
-    q_num = int(quarter[1])
-    windows = [(quarter, q_num, year)]
-    if include_prior:
-        pq, py = (q_num - 1, year) if q_num > 1 else (4, year - 1)
-        windows.append((f"Q{pq}", pq, py))
+    # Requested periods, de-duplicated and stable. Buckets are seeded for ALL of
+    # them so callers always get a key back, even for empty quarters.
+    wanted: list[tuple[str, int]] = []
+    for q, y in periods:
+        if (q, y) not in wanted:
+            wanted.append((q, y))
+    buckets: dict[tuple[str, int], list[SourceDocument]] = {p: [] for p in wanted}
+
+    # ONE window spanning the union of every requested period (+lag), so a single
+    # NSE/BSE query covers them all instead of one overlapping query per quarter.
+    span_start = min(_search_window(q, y, doc_types_set)[0] for q, y in wanted)
+    span_end   = max(_search_window(q, y, doc_types_set)[1] for q, y in wanted)
 
     nse: Optional[NSE] = None
     for attempt in range(3):
@@ -371,8 +408,6 @@ async def fetch_documents(
                     f"— NSE filings will be skipped: {e}"
                 )
             else:
-                # Back off before retrying; concurrent handshakes from one IP
-                # are what NSE's bot protection throttles most aggressively.
                 await asyncio.sleep(2 * (attempt + 1))
 
     bse = BSE(download_folder=str(settings.BSE_CACHE_DIR))
@@ -385,34 +420,25 @@ async def fetch_documents(
             logger.warning(f"BSE scrip code lookup failed for '{company}' — BSE filings will be skipped: {e}")
             scripcode = None
 
-    raw_items: list[tuple[str, dict, str, int]] = []   # (source, item, quarter_label, fiscal_year)
-    for q_label, q_n, yr in windows:
-        start, end = _search_window(q_label, yr, doc_types_set)
-
-        if nse is not None:
-            nse_items = await _fetch_nse(nse, ticker, start, end)
-            for item in nse_items:
-                raw_items.append(("NSE", item, q_label, yr))
-
-        if scripcode:
-            bse_items = await _fetch_bse(bse, scripcode, start, end)
-            for item in bse_items:
-                raw_items.append(("BSE", item, q_label, yr))
+    raw_items: list[tuple[str, dict]] = []
+    if nse is not None:
+        for item in await _fetch_nse(nse, ticker, span_start, span_end):
+            raw_items.append(("NSE", item))
+    if scripcode:
+        for item in await _fetch_bse(bse, scripcode, span_start, span_end):
+            raw_items.append(("BSE", item))
 
     if nse is not None:
-        try:
-            nse.exit()
-        except Exception:
-            pass
-    try:
-        bse.exit()
-    except Exception:
-        pass
+        try: nse.exit()
+        except Exception: pass
+    try: bse.exit()
+    except Exception: pass
 
-    # Classify + dedupe by PDF url before downloading anything
+    # Classify + date + dedupe by PDF url — ONCE, across the whole span.
+    wanted_set = set(wanted)
     candidates: list[dict] = []
     seen_urls: set[str] = set()
-    for source, item, q_label, yr in raw_items:
+    for source, item in raw_items:
         if source == "NSE":
             subject = _nse_subject(item)
             urls = [_nse_pdf_url(item)] if _nse_pdf_url(item) else []
@@ -428,65 +454,81 @@ async def fetch_documents(
         if dtype is None:
             continue
         key = urls[0]
-        if key in seen_urls:
+        if key in seen_urls:      # same pdf seen earlier in the span → skip outright
             continue
 
-        # Which period is this document actually ABOUT? Consecutive search
-        # windows overlap by ~NSE_BSE_RESULT_LAG_DAYS, so the same filing turns
-        # up in two windows. Labelling it with the requested quarter filed one
-        # earnings call as BOTH Q4 2025 and Q1 2026 — two doc_ids, two chunk
-        # sets, two quarters silently scoring identical evidence.
-        #
-        # Annual reports cover a year, not a quarter, so this doesn't apply.
-        if dtype is not DocumentType.ANNUAL_REPORT:
+        # Which period is this document ACTUALLY about? Date it once, place it once.
+        # Annual reports cover a year, not a quarter, so they attach to whichever
+        # requested period they fall in by event date.
+        if dtype is DocumentType.ANNUAL_REPORT:
+            period = _period_from_event_date(event_date)
+        else:
             period, how = _document_period(subject, event_date)
-            if period is None:
-                logger.debug(
-                    f"[fetch] Cannot date {subject[:60]!r} — keeping under the "
-                    f"requested {q_label} {yr} (unverified)."
-                )
-            elif period != (q_label, yr):
-                logger.debug(
-                    f"[fetch] Skipping {subject[:60]!r}: it reports on "
-                    f"{period[0]} {period[1]} (from {how}), not {q_label} {yr}. "
-                    f"The {period[0]} {period[1]} window will pick it up."
-                )
-                continue
+
+        if period is None:
+            logger.debug(f"[fetch] Cannot date {subject[:60]!r} — dropped (belongs to no requested period).")
+            continue
+        if period not in wanted_set:
+            logger.debug(f"[fetch] {subject[:50]!r} reports on {period[0]} {period[1]} — outside requested set; skipped.")
+            continue
 
         seen_urls.add(key)
         candidates.append({
             "urls": urls, "subject": subject, "doc_type": dtype,
-            "quarter": q_label, "fiscal_year": yr, "event_date": event_date,
-            "source": source,
+            "period": period, "event_date": event_date, "source": source,
         })
 
-    # Rank: prefer earnings call / investor presentation / press release, then recency
-    _priority = {
-        DocumentType.EARNINGS_CALL: 0, DocumentType.INVESTOR_PRESENTATION: 1,
-        DocumentType.PRESS_RELEASE: 2, DocumentType.ANNUAL_REPORT: 3,
-        DocumentType.MANAGEMENT_COMMENTARY: 4,
-    }
-    candidates.sort(key=lambda c: (_priority.get(c["doc_type"], 9), c["event_date"] or datetime.min), reverse=False)
-    candidates = candidates[: settings.NSE_BSE_MAX_DOCS_PER_QUARTER * len(windows)]
+    # Rank within each bucket, then cap per period (same limit as before).
+    docs_by_period: dict[tuple[str, int], list[dict]] = {p: [] for p in wanted}
+    for c in candidates:
+        docs_by_period[c["period"]].append(c)
+    for p, cs in docs_by_period.items():
+        cs.sort(key=lambda c: (_DTYPE_PRIORITY.get(c["doc_type"], 9), c["event_date"] or datetime.min))
+        docs_by_period[p] = cs[: settings.NSE_BSE_MAX_DOCS_PER_QUARTER]
 
-    docs: list[SourceDocument] = []
+    # Download every kept candidate ONCE (flattened), then distribute to buckets.
+    flat = [c for p in wanted for c in docs_by_period[p]]
     async with httpx.AsyncClient() as client:
-        texts = await asyncio.gather(*[_download_pdf_text(client, c["urls"]) for c in candidates])
+        texts = await asyncio.gather(*[_download_pdf_text(client, c["urls"]) for c in flat])
 
-    for c, text in zip(candidates, texts):
+    for c, text in zip(flat, texts):
         if len(text) < 200:
             continue
+        q_label, yr = c["period"]
         url = c["urls"][0]
-        docs.append(SourceDocument(
-            doc_id=_doc_id(ticker, c["doc_type"].value, c["quarter"], url),
+        buckets[c["period"]].append(SourceDocument(
+            doc_id=_doc_id(ticker, c["doc_type"].value, q_label, url),
             ticker=ticker, company=company, doc_type=c["doc_type"],
-            quarter=c["quarter"], fiscal_year=c["fiscal_year"],
+            quarter=q_label, fiscal_year=yr,
             event_date=c["event_date"], source_url=url,
             title=c["subject"][:200], raw_text=text[:30000],
         ))
 
+    total = sum(len(v) for v in buckets.values())
     logger.success(
-        f"Fetched {len(docs)} documents for {ticker} {quarter} {year} "
+        f"Fetched {total} documents for {ticker} across {len(wanted)} period(s) "
+        f"[{', '.join(f'{q} {y}:{len(buckets[(q,y)])}' for q, y in wanted)}] "
         f"(NSE symbol={ticker}, BSE scripcode={scripcode or 'n/a'})"
     )
-    return docs
+    return buckets
+
+
+async def fetch_documents(
+    ticker: str, company: str, quarter: str, year: int,
+    doc_types: list[str] | None = None, include_prior: bool = True,
+    bse_scripcode: str | None = None,
+) -> list[SourceDocument]:
+    """
+    Backward-compatible single-period entry point (used by the CLI / API).
+    Delegates to fetch_all_periods so there is one fetch/bucketing code path.
+    """
+    periods = [(quarter, year)]
+    if include_prior:
+        q_num = int(quarter[1])
+        pq, py = (q_num - 1, year) if q_num > 1 else (4, year - 1)
+        periods.append((f"Q{pq}", py))
+    buckets = await fetch_all_periods(
+        ticker, company, periods, doc_types=doc_types, bse_scripcode=bse_scripcode
+    )
+    # Same contract as before: a flat list for the requested (and prior) periods.
+    return [d for p in periods for d in buckets.get(p, [])]
