@@ -34,7 +34,7 @@ from agents.confidence_agent import ConfidenceAgent
 from agents.narrative_agent import NarrativeAgent
 from agents.guidance_agent import GuidanceAgent
 from agents.risk_agent import RiskAgent
-from models import SignalBundle
+from models import SignalBundle, format_period
 
 
 # ── Progress reporting ────────────────────────────────────────────────────────
@@ -98,12 +98,12 @@ def _yoy_quarter(q: str, yr: int) -> tuple[str, int]:
 
 
 def _latest_completed_quarter() -> tuple[str, int]:
-    """Returns the most recently completed quarter (calendar Q minus one)."""
+    """Most recently completed Indian FISCAL quarter (year runs Apr–Mar)."""
     now = datetime.utcnow()
-    current_q = (now.month - 1) // 3 + 1
-    if current_q == 1:
-        return "Q4", now.year - 1
-    return f"Q{current_q - 1}", now.year
+    m = now.month
+    cq = (m - 4) % 12 // 3 + 1              # current fiscal quarter
+    cfy = now.year + 1 if m >= 4 else now.year
+    return _prior_quarter(f"Q{cq}", cfy)    # the one before it is the last completed
 
 
 def resolve_quarters(
@@ -154,7 +154,7 @@ async def _ingest_quarter(
     Fetch + chunk + embed one quarter.
     Returns (doc_count, chunk_count).
     """
-    label = label or f"{quarter} {year}"
+    label = label or format_period(quarter, year)
     try:
         docs = await fetch_documents(
             ticker, company, quarter, year, include_prior=False
@@ -200,7 +200,7 @@ async def ingest_all(
         (state["qoq_q"],    state["qoq_yr"]),
         (state["yoy_q"],    state["yoy_yr"]),
     ]
-    labels = [f"{q} {y}" for q, y in quarters]
+    labels = [format_period(q, y) for q, y in quarters]
 
     logger.info(
         f"[ingest] {ticker} → {labels[0]} | {labels[1]} | {labels[2]}"
@@ -269,7 +269,7 @@ async def _run_signals_for_quarter(
     when 12 LLM calls fire simultaneously across 3 quarters.
     """
     errors: list[str] = []
-    label = f"{quarter} {year}"
+    label = format_period(quarter, year)
 
     # Skip if too few chunks — agents would produce hallucinated signals
     if chunk_count < MIN_CHUNKS_TO_SCORE:
@@ -396,9 +396,9 @@ async def run_all_signals(
     model = state.get("model")   # per-run, not global
 
     labels = [
-        f"{state['latest_q']} {state['latest_yr']}",
-        f"{state['qoq_q']} {state['qoq_yr']}",
-        f"{state['yoy_q']} {state['yoy_yr']}",
+        format_period(state['latest_q'], state['latest_yr']),
+        format_period(state['qoq_q'], state['qoq_yr']),
+        format_period(state['yoy_q'], state['yoy_yr']),
     ]
     progress("signals_start", {"quarters": labels})
 
@@ -540,7 +540,7 @@ async def run_comparison_pipeline(
     )
     progress("pipeline_start", {
         "ticker": ticker.upper(),
-        "latest": f"{lq} {ly}", "qoq": f"{qq} {qy}", "yoy": f"{yq} {yy}",
+        "latest": format_period(lq, ly), "qoq": format_period(qq, qy), "yoy": format_period(yq, yy),
     })
 
     graph = build_graph(vs, ss, progress)
@@ -571,9 +571,9 @@ async def run_comparison_pipeline(
         "latest":        final.get("latest_bundle"),
         "qoq":           final.get("qoq_bundle"),
         "yoy":           final.get("yoy_bundle"),
-        "latest_label":  f"{lq} {ly}",
-        "qoq_label":     f"{qq} {qy}",
-        "yoy_label":     f"{yq} {yy}",
+        "latest_label":  format_period(lq, ly),
+        "qoq_label":     format_period(qq, qy),
+        "yoy_label":     format_period(yq, yy),
         "docs_ingested": final.get("docs_ingested", 0),
         "chunks_by_quarter": final.get("chunks_by_quarter", {}),
         "errors":        final.get("errors", []),

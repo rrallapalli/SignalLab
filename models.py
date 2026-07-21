@@ -13,6 +13,49 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
+def parse_period(label: str) -> tuple[str, int | None]:
+    """
+    Inverse of format_period(): "Q1 FY27" -> ("Q1", 2027).
+
+    Returns the 4-digit FISCAL year as an int (the value stored in the
+    `fiscal_year` DB column), or None if the label has no parseable year.
+    Tolerates the pre-fiscal "Q1 2027" shape too, so old labels don't crash.
+    """
+    parts = (label or "").split()
+    if not parts:
+        return "", None
+    quarter = parts[0]
+    if len(parts) < 2:
+        return quarter, None
+    tok = parts[-1].upper().removeprefix("FY")
+    try:
+        y = int(tok)
+    except ValueError:
+        return quarter, None
+    if y < 100:            # "FY27" -> 2027
+        y += 2000
+    return quarter, y
+
+
+def format_period(quarter: str, year: int | str) -> str:
+    """
+    Canonical human-facing period label in Indian fiscal-year notation.
+
+        format_period("Q1", 2027) -> "Q1 FY27"
+
+    The app's (quarter, year) pairs are FISCAL: fiscal year runs Apr–Mar, so
+    Q1 FY27 = Apr–Jun 2026 and Q4 FY27 = Jan–Mar 2027. `year` is the full 4-digit
+    fiscal year. This is used as BOTH the displayed label and the join key that
+    matches records across signal types, so every call site must route through
+    here — a bare f"{quarter} {year}" elsewhere would fail to match these.
+    """
+    try:
+        y = int(year)
+    except (TypeError, ValueError):
+        return f"{quarter} {year}".strip()
+    return f"{quarter} FY{y % 100:02d}"
+
+
 # ═══════════════════════════════════════════════════════
 # Document models
 # ═══════════════════════════════════════════════════════

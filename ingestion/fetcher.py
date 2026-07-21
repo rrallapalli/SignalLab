@@ -109,15 +109,28 @@ def _doc_id(ticker: str, doc_type: str, quarter: str, url: str) -> str:
 #   2. "Q<n> FY<yy>" in the subject                        — needs the fiscal map
 #   3. the most recently ENDED quarter before the event    — heuristic fallback
 #
-# Everything maps onto _quarter_bounds' CALENDAR-quarter convention, so the
-# labels stay consistent with the rest of the app.
+# Everything maps onto _quarter_bounds' FISCAL-quarter convention (year runs
+# Apr–Mar), so the labels stay consistent with the rest of the app.
 
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 
 
-def _calendar_quarter(d: datetime) -> tuple[str, int]:
-    return f"Q{(d.month - 1) // 3 + 1}", d.year
+def _fiscal_quarter(d: datetime) -> tuple[str, int]:
+    """
+    Calendar date → Indian FISCAL quarter (year runs Apr–Mar).
+
+        Apr–Jun -> Q1 (FY = calendar year + 1)
+        Jul–Sep -> Q2 (FY = calendar year + 1)
+        Oct–Dec -> Q3 (FY = calendar year + 1)
+        Jan–Mar -> Q4 (FY = calendar year)
+
+    e.g. Jun 2026 -> ("Q1", 2027);  Dec 2025 -> ("Q3", 2026);  Feb 2026 -> ("Q4", 2026).
+    """
+    m = d.month
+    q = (m - 4) % 12 // 3 + 1          # Apr=Q1 … Jan/Feb/Mar=Q4
+    fy = d.year + 1 if m >= 4 else d.year
+    return f"Q{q}", fy
 
 
 def _period_from_subject(subject: str) -> tuple[str, int] | None:
@@ -149,7 +162,7 @@ def _period_from_subject(subject: str) -> tuple[str, int] | None:
                 if year < 100:
                     year += 2000
                 if 2000 <= year <= 2100:
-                    return _calendar_quarter(datetime(year, month, 1))
+                    return _fiscal_quarter(datetime(year, month, 1))
 
         # Numeric: 31.12.2025 / 30-06-2025 / 31/03/26  (day first, Indian style)
         dm = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b", tail)
@@ -158,34 +171,28 @@ def _period_from_subject(subject: str) -> tuple[str, int] | None:
             if yr < 100:
                 yr += 2000
             if 1 <= mon <= 12 and 2000 <= yr <= 2100:
-                return _calendar_quarter(datetime(yr, mon, 1))
+                return _fiscal_quarter(datetime(yr, mon, 1))
 
-    # "Q1 FY26" · "Q1 FY2026" — Indian fiscal year runs Apr–Mar, so fiscal
-    # Q1 FY26 = Apr–Jun 2025 = CALENDAR Q2 2025.
+    # "Q1 FY26" · "Q1 FY2026" — already fiscal, so return it directly.
     m = re.search(r"\bq([1-4])\s*(?:fy|f\.y\.?|fiscal)\s*[\s\-]?(\d{2,4})\b", s)
     if m:
         fq, fy_raw = int(m.group(1)), int(m.group(2))
         fy = fy_raw + 2000 if fy_raw < 100 else fy_raw
-        start_month = 4 + (fq - 1) * 3
-        start_year = fy - 1
-        if start_month > 12:
-            start_month -= 12
-            start_year += 1
-        return _calendar_quarter(datetime(start_year, start_month, 1))
+        return f"Q{fq}", fy
 
     return None
 
 
 def _period_from_event_date(event_date: datetime | None) -> tuple[str, int] | None:
     """
-    Fallback: results are published shortly AFTER the quarter they report on, so
-    the subject period is the most recently ENDED calendar quarter.
+    Fallback: results are published shortly AFTER the fiscal quarter they report
+    on, so the subject period is the most recently ENDED fiscal quarter.
     """
     if not event_date:
         return None
-    q_start_month = ((event_date.month - 1) // 3) * 3 + 1
-    prev_end = datetime(event_date.year, q_start_month, 1) - timedelta(days=1)
-    return _calendar_quarter(prev_end)
+    start, _ = _quarter_bounds(*_fiscal_quarter(event_date))
+    prev_end = start - timedelta(days=1)
+    return _fiscal_quarter(prev_end)
 
 
 def _document_period(subject: str, event_date: datetime | None) -> tuple[tuple[str, int] | None, str]:
@@ -209,11 +216,22 @@ def _classify(subject: str, allowed: set[str]) -> Optional[DocumentType]:
 
 
 def _quarter_bounds(quarter: str, year: int) -> tuple[datetime, datetime]:
-    """Calendar-quarter bounds, e.g. Q2 2024 -> (Apr 1 2024, Jun 30 2024)."""
+    """
+    FISCAL-quarter bounds (year runs Apr–Mar), `year` = 4-digit fiscal year.
+
+        Q1 FY2027 -> (Apr 1 2026, Jun 30 2026)
+        Q2 FY2027 -> (Jul 1 2026, Sep 30 2026)
+        Q3 FY2027 -> (Oct 1 2026, Dec 31 2026)
+        Q4 FY2027 -> (Jan 1 2027, Mar 31 2027)
+    """
     q = int(quarter[1])
-    start_month = (q - 1) * 3 + 1
-    start = datetime(year, start_month, 1)
-    end_month, end_year = start_month + 2, year
+    start_month = 4 + (q - 1) * 3       # Q1→Apr, Q2→Jul, Q3→Oct, Q4→13(→Jan)
+    start_year = year - 1
+    if start_month > 12:                # Q4 rolls into the next calendar year
+        start_month -= 12
+        start_year += 1
+    start = datetime(start_year, start_month, 1)
+    end_month, end_year = start_month + 2, start_year
     if end_month == 12:
         end = datetime(end_year, 12, 31, 23, 59, 59)
     else:

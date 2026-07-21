@@ -12,6 +12,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
+from models import format_period, parse_period
 from store.signal_store import SignalStore
 from store.vector_store import VectorStore
 
@@ -589,7 +590,7 @@ def _trend_chart(history: list[dict], col: str, color: str = "#7c3aed",
                  ymax: float | None = None) -> go.Figure:
     if not history: return go.Figure()
     df = pd.DataFrame(history).sort_values(["fiscal_year","quarter"])
-    df["lbl"] = df["quarter"] + " " + df["fiscal_year"].astype(str)
+    df["lbl"] = df.apply(lambda _r: format_period(_r["quarter"], _r["fiscal_year"]), axis=1)
     fig = go.Figure(go.Scatter(
         x=df["lbl"], y=df[col], mode="lines+markers",
         line=dict(color=color, width=2.5), marker=dict(size=7, color=color),
@@ -878,12 +879,12 @@ else:
     # Reconstruct from DB: latest = first row, qoq = second, yoy = matching quarter -1yr
     def _find_row(history, quarter_label):
         for r in history:
-            if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == quarter_label:
+            if format_period(r.get('quarter',''), r.get('fiscal_year','')) == quarter_label:
                 return r
         return history[0] if history else {}
 
-    label_l = f"{conf_history[0].get('quarter','')} {conf_history[0].get('fiscal_year','')}" if conf_history else "—"
-    l_q, l_yr = label_l.split(" ") if " " in label_l else ("Q1","2024")
+    label_l = format_period(conf_history[0].get('quarter',''), conf_history[0].get('fiscal_year','')) if conf_history else "—"
+    l_q, _l_yr_int = parse_period(label_l); l_yr = str(_l_yr_int) if _l_yr_int else "2024"
     from agents.orchestrator import resolve_quarters
     (lq,ly),(qq,qy),(yq,yy) = resolve_quarters(l_q, int(l_yr))
     label_q = f"{qq} {qy}"
@@ -942,7 +943,7 @@ else:
 
     def _get_row(history, label):
         for r in history:
-            if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == label:
+            if format_period(r.get('quarter',''), r.get('fiscal_year','')) == label:
                 return r
         return {}
 
@@ -1281,7 +1282,7 @@ with tab3:
 
     # ── YTD Guidance callout ──────────────────────────────────────────────────
     from datetime import datetime as _dt
-    _ytd_yr   = int(label_l.split()[-1]) if label_l != "—" else _dt.utcnow().year
+    _ytd_yr   = parse_period(label_l)[1] or _dt.utcnow().year
     _ytd_guid = ss.get_ytd_guidance(active_ticker, _ytd_yr)
 
     if _ytd_guid:
@@ -1410,7 +1411,7 @@ with tab4:
 
     # ── YTD Risk callout ──────────────────────────────────────────────────────
     from datetime import datetime as _dt2
-    _ytd_yr2  = int(label_l.split()[-1]) if label_l != "—" else _dt2.utcnow().year
+    _ytd_yr2  = parse_period(label_l)[1] or _dt2.utcnow().year
     _ytd_risk = ss.get_ytd_risks(active_ticker, _ytd_yr2)
 
     if _ytd_risk:
@@ -1557,7 +1558,7 @@ with tab5:
         risk_all = ss.get_risk_history(active_ticker, 20)
         def _get_risk_row(lbl):
             for r in risk_all:
-                if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl: return r
+                if format_period(r.get('quarter',''), r.get('fiscal_year','')) == lbl: return r
             return {}
         # Δ vs the IMMEDIATELY PRECEDING quarter — computed from real stored
         # scores, not the 'change' column the LLM used to invent.
@@ -1570,7 +1571,7 @@ with tab5:
         from agents.orchestrator import _prior_quarter
 
         _by_period = {
-            f"{r.get('quarter','')} {r.get('fiscal_year','')}": r for r in conf_history
+            format_period(r.get('quarter',''), r.get('fiscal_year','')): r for r in conf_history
         }
         for cr in conf_history:
             _cur_s = cr.get("score")
@@ -1583,9 +1584,9 @@ with tab5:
                     _dconf = f"{float(_cur_s) - float(_prev_s):+.1f}"
             except (ValueError, TypeError):
                 pass
-            lbl = f"{cr.get('quarter','')} {cr.get('fiscal_year','')}"
-            gr  = next((r for r in guid_history if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl), {})
-            nr  = next((r for r in narr_history if f"{r.get('quarter','')} {r.get('fiscal_year','')}" == lbl), {})
+            lbl = format_period(cr.get('quarter',''), cr.get('fiscal_year',''))
+            gr  = next((r for r in guid_history if format_period(r.get('quarter',''), r.get('fiscal_year','')) == lbl), {})
+            nr  = next((r for r in narr_history if format_period(r.get('quarter',''), r.get('fiscal_year','')) == lbl), {})
             rr  = _get_risk_row(lbl)
             current_lbl = lbl == label_l
             all_rows.append({
@@ -1627,7 +1628,7 @@ with tab6:
 
         # Filter by quarter
         all_quarters_in_docs = sorted(
-            set(f"{d.get('quarter','')} {d.get('fiscal_year','')}" for d in source_docs),
+            set(format_period(d.get('quarter',''), d.get('fiscal_year','')) for d in source_docs),
             reverse=True,
         )
         selected_source_q = st.selectbox(
@@ -1638,12 +1639,12 @@ with tab6:
         # Display documents
         filtered = source_docs if selected_source_q == "All quarters" else [
             d for d in source_docs
-            if f"{d.get('quarter','')} {d.get('fiscal_year','')}" == selected_source_q
+            if format_period(d.get('quarter',''), d.get('fiscal_year','')) == selected_source_q
         ]
 
         for doc in filtered:
             dtype     = doc.get("doc_type", "")
-            quarter   = f"{doc.get('quarter','')} {doc.get('fiscal_year','')}"
+            quarter   = format_period(doc.get('quarter',''), doc.get('fiscal_year',''))
             title     = doc.get("title","") or "Untitled"
             url       = doc.get("source_url","")
             chunks    = doc.get("chunk_count", 0)
