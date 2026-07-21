@@ -75,10 +75,14 @@ def _print_bundle(bundle) -> None:
 
     if bundle.guidance:
         g = bundle.guidance
-        score_color = "green" if g.score >= 70 else "yellow" if g.score >= 50 else "red"
+        if g.score is None:
+            score_display = "[dim]— not assessed[/dim]"
+        else:
+            score_color = "green" if g.score >= 70 else "yellow" if g.score >= 50 else "red"
+            score_display = f"[{score_color}]{g.score:.0f}/100[/{score_color}]"
         table.add_row(
             "Guidance Credibility",
-            f"[{score_color}]{g.score:.0f}/100[/{score_color}]",
+            score_display,
             g.summary[:100] + ("…" if len(g.summary)>100 else ""),
         )
 

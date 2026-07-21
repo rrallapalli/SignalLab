@@ -223,7 +223,11 @@ class GuidanceSignal(SignalBase):
     Scores how accurately management's guidance matched actual results.
     Tracks history of guidance items across periods.
     """
-    score:                    float   # 0–100
+    # None = guidance was NOT assessed (company issued no trackable guidance this
+    # period). 0.0 = assessed and not credible. These must never collapse: an
+    # absence of measurement is not a verdict of zero. Every reader of `score`
+    # therefore has to distinguish None from a number.
+    score:                    Optional[float] = None   # 0–100, or None if not assessed
     guidance_items:           list[GuidanceItem] = Field(default_factory=list)
     periods_tracked:          int = 0
     beats:                    int = 0

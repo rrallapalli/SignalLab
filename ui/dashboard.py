@@ -887,8 +887,8 @@ else:
     l_q, _l_yr_int = parse_period(label_l); l_yr = str(_l_yr_int) if _l_yr_int else "2024"
     from agents.orchestrator import resolve_quarters
     (lq,ly),(qq,qy),(yq,yy) = resolve_quarters(l_q, int(l_yr))
-    label_q = f"{qq} {qy}"
-    label_y = f"{yq} {yy}"
+    label_q = format_period(qq, qy)
+    label_y = format_period(yq, yy)
 
     # Build minimal bundle dicts from DB rows
     def _row_to_bundle(conf_row, narr_row, guid_row, risk_row):
@@ -999,10 +999,18 @@ st.divider()
 # ── Data coverage banner ──────────────────────────────────────────────────────
 
 def _has_signal(b, key):
+    # Presence, not verdict: a signal is "present" if its stored object exists —
+    # NOT if it carries a score. A not-assessed guidance is a real, successfully
+    # scored row with score=None and a summary ("No formal guidance issued…");
+    # testing score-is-not-None would wrongly report it as a missing signal type.
     if not b or not isinstance(b, dict): return False
     sig = b.get(key)
-    if not sig or not isinstance(sig, dict): return False
-    return sig.get("score") is not None or sig.get("overall_shift") is not None or sig.get("overall_risk_direction") is not None
+    if not isinstance(sig, dict): return False
+    # A populated signal dict always carries at least a summary / direction field.
+    return any(
+        sig.get(f) not in (None, "", [], {})
+        for f in ("score", "summary", "overall_shift", "overall_risk_direction", "citations")
+    )
 
 _coverage = {
     label_l: {"Confidence": _has_signal(latest_b,"confidence"), "Narrative": _has_signal(latest_b,"narrative"), "Guidance": _has_signal(latest_b,"guidance"), "Risk": _has_signal(latest_b,"risk")},
@@ -1337,34 +1345,41 @@ with tab3:
     qg = _guid(qoq_b)
     yg = _guid(yoy_b)
 
-    l_gs = float(lg.get("score") or 0)
-    q_gs = float(qg.get("score") or 0)
-    y_gs = float(yg.get("score") or 0)
+    # Keep None as None: a not-assessed period must not render as a real 0/100.
+    def _gs(g):
+        v = g.get("score")
+        return float(v) if v is not None else None
+    l_gs = _gs(lg)
+    q_gs = _gs(qg)
+    y_gs = _gs(yg)
 
     _cmp_render([
         _cmp_row("Guidance Score", [
             _cmp_cell(_score_cell(l_gs, 100), "latest", label_l,
                       why=_why_html(lg.get("summary",""), None, lg.get("citations"))),
-            _cmp_cell(_score_cell(q_gs, 100) if q_gs else None, "qoq", label_q,
-                      delta=_delta_html(l_gs, q_gs) if q_gs else "",
+            _cmp_cell(_score_cell(q_gs, 100) if q_gs is not None else None, "qoq", label_q,
+                      delta=_delta_html(l_gs, q_gs) if (q_gs is not None and l_gs is not None) else "",
                       why=_why_html(qg.get("summary",""), None, qg.get("citations"))),
-            _cmp_cell(_score_cell(y_gs, 100) if y_gs else None, "yoy", label_y,
-                      delta=_delta_html(l_gs, y_gs) if y_gs else "",
+            _cmp_cell(_score_cell(y_gs, 100) if y_gs is not None else None, "yoy", label_y,
+                      delta=_delta_html(l_gs, y_gs) if (y_gs is not None and l_gs is not None) else "",
                       why=_why_html(yg.get("summary",""), None, yg.get("citations"))),
         ], help_text=(
             "0–100 score for how reliably management delivers on its OWN guidance. Compares "
             "guidance given in past quarters against results actually reported later. A low "
-            "score with repeated misses is flagged as serial-miss risk."
+            "score with repeated misses is flagged as serial-miss risk. "
+            "\"—\" means no formal guidance was issued that period (not a score of zero)."
         )),
     ])
 
     with st.container(key="gauge-row-guidance"):
         _, g4, g5, g6 = st.columns([1.4, 1, 1, 1])
-        with g4: st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_4")
+        with g4:
+            if l_gs is not None: st.plotly_chart(_gauge(l_gs, 100), use_container_width=True, key="chart_4")
+            else: st.caption("No guidance issued this period.")
         with g5:
-            if q_gs: st.plotly_chart(_gauge(q_gs, 100), use_container_width=True, key="chart_5")
+            if q_gs is not None: st.plotly_chart(_gauge(q_gs, 100), use_container_width=True, key="chart_5")
         with g6:
-            if y_gs: st.plotly_chart(_gauge(y_gs, 100), use_container_width=True, key="chart_6")
+            if y_gs is not None: st.plotly_chart(_gauge(y_gs, 100), use_container_width=True, key="chart_6")
 
     st.divider()
 
@@ -1578,7 +1593,7 @@ with tab5:
             _dconf = "—"
             try:
                 _pq, _py = _prior_quarter(cr.get("quarter", ""), int(cr.get("fiscal_year") or 0))
-                _prev = _by_period.get(f"{_pq} {_py}")
+                _prev = _by_period.get(format_period(_pq, _py))
                 _prev_s = _prev.get("score") if _prev else None
                 if _cur_s is not None and _prev_s is not None:
                     _dconf = f"{float(_cur_s) - float(_prev_s):+.1f}"
@@ -1594,7 +1609,8 @@ with tab5:
                 "Confidence": f"{float(cr.get('score',0)):.1f}/10",
                 "Δ Conf":     _dconf,
                 "Tone":       (cr.get("tone","") or "").title(),
-                "Guidance":   f"{float(gr.get('score',0)):.0f}/100" if gr else "—",
+                "Guidance":   (f"{float(gr.get('score')):.0f}/100"
+                               if gr and gr.get("score") is not None else "—"),
                 "Narrative":  (nr.get("overall_shift","") or "").title() if nr else "—",
                 "Risk":       (rr.get("overall_risk_direction","") or "").title() if rr else "—",
             })

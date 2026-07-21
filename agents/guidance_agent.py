@@ -159,18 +159,36 @@ Score guidance credibility based on the full history available.
             _in_line = safe_int(data.get("in_line"))
             _tracked = _beats + _misses + _in_line
 
-            # Nothing tracked means guidance credibility was NOT assessed. The
-            # 0–100 rubric has no "unknown" band, so the model reaches for ~45
-            # ("Mixed, ~50% accuracy, some serial misses") and publishes a
-            # verdict on evidence it has just admitted it doesn't have — hence
-            # "45/100. There is insufficient data to evaluate guidance accuracy."
-            # Refuse: the orchestrator records it and the tab shows no data.
+            # Nothing tracked means guidance credibility was NOT assessed — the
+            # company issued no trackable guidance this period (common for Indian
+            # names giving qualitative commentary, not US-style point/range
+            # guidance). This is a LEGITIMATE result, not a failure: return a
+            # valid signal with score=None so the quarter still counts as scored
+            # (the orchestrator only marks a period done when all four agents
+            # succeed — raising here left the quarter permanently "incomplete"
+            # and forced a full re-score of the other three agents every run).
+            #
+            # score=None (not 0) is deliberate: 0 is a verdict ("not credible"),
+            # absence is not. The dashboard renders None as "No guidance issued".
             if _tracked == 0:
-                raise ValueError(
-                    "no guidance items found to assess — refusing to publish a "
-                    "credibility score with nothing to score against"
+                logger.info(f"[GuidanceAgent] {ticker} {quarter} {fiscal_year}: no trackable guidance — recording as not assessed.")
+                return GuidanceSignal(
+                    ticker=ticker, company=company,
+                    quarter=quarter, fiscal_year=fiscal_year,
+                    score=None,
+                    guidance_items=[],
+                    periods_tracked=0,
+                    beats=0, misses=0, in_line=0, withdrawals=0,
+                    beat_rate=0.0,
+                    serial_miss_risk=False,
+                    recent_pattern=[],
+                    summary=(data.get("summary") or
+                             "No formal guidance issued this period — nothing to assess for credibility."),
+                    citations=citations,
                 )
 
+            # Items exist but the model gave no usable score — that IS a failure
+            # (a glitch, not an honest absence), so keep raising to retry.
             _score = safe_float(data.get("score"), None)
             if _score is None:
                 raise ValueError("model returned no usable 'score'")
