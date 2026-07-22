@@ -38,9 +38,39 @@ class VectorStore:
         return [e.embedding for e in resp.data]
 
     def upsert_chunks(self, chunks: list[DocumentChunk]) -> int:
-        """Embed and upsert chunks. Returns count added."""
+        """
+        Embed and upsert chunks. Returns the TOTAL number of chunks this
+        document contributes — not just the newly embedded ones.
+
+        Chunks whose id is already in the collection are skipped: chunk_id is a
+        hash of doc_id + offset + text, so an identical id means identical text
+        and re-embedding it buys nothing but latency and OpenAI spend. On a
+        re-run of an unchanged ticker this makes ingestion almost free.
+
+        The return value deliberately counts skipped chunks too. The orchestrator
+        compares it against MIN_CHUNKS_TO_SCORE to decide whether a quarter has
+        enough evidence to score; returning only the new count would make every
+        re-run look like a quarter with zero evidence and silently skip scoring.
+        """
         if not chunks:
             return 0
+
+        total = len(chunks)
+
+        # Which of these are already embedded?
+        existing: set[str] = set()
+        try:
+            found = self._col.get(ids=[c.chunk_id for c in chunks], include=[])
+            existing = set(found.get("ids") or [])
+        except Exception as e:
+            logger.debug(f"Existence check failed ({e}); embedding all chunks.")
+
+        chunks = [c for c in chunks if c.chunk_id not in existing]
+        if not chunks:
+            logger.debug(f"All {total} chunks already embedded — skipped.")
+            return total
+        if existing:
+            logger.debug(f"Embedding {len(chunks)} new chunks ({len(existing)} already present).")
 
         texts     = [c.text for c in chunks]
         ids       = [c.chunk_id for c in chunks]
@@ -57,6 +87,13 @@ class VectorStore:
                 "source_url":   c.source_url,
                 "title":        c.title[:200],
                 "doc_id":       c.doc_id,
+                # Persist the real chunk_id. It used to be absent, so retrieve()
+                # rebuilt it as doc_id + "_r" — giving every chunk from one
+                # document the SAME id. rag_retrieve() dedupes on that id, so all
+                # but the top-scoring chunk per document were silently discarded:
+                # ~12 documents meant ~12 chunks of evidence no matter how large
+                # TOP_K_RETRIEVAL was set.
+                "chunk_id":     c.chunk_id,
             }
             for c in chunks
         ]
@@ -74,7 +111,7 @@ class VectorStore:
             metadatas=metadatas,
         )
         logger.debug(f"Upserted {len(chunks)} chunks")
-        return len(chunks)
+        return total
 
     def retrieve(
         self,
@@ -174,7 +211,7 @@ class VectorStore:
         for text, meta, dist in zip(docs, metas, dists):
             from models import DocumentSection, DocumentType
             chunk = DocumentChunk(
-                chunk_id=meta.get("doc_id", "") + "_r",
+                chunk_id=meta.get("chunk_id") or (meta.get("doc_id", "") + "_r"),
                 doc_id=meta.get("doc_id", ""),
                 ticker=meta.get("ticker",""),
                 company=meta.get("company",""),
@@ -215,6 +252,66 @@ class VectorStore:
                 relevance=round(score, 3),
             ))
         return citations
+
+    def prune_period(
+        self, ticker: str, quarter: str, fiscal_year: int | str,
+        keep_doc_ids: set[str],
+    ) -> int:
+        """
+        Delete chunks for this ticker/period whose document is no longer part of
+        the ingested corpus. Returns the number removed.
+
+        Chroma and DuckDB drift apart without this. Ingestion adds chunks but
+        nothing ever removes them, so when a document stops being ingested — it
+        was dropped as a duplicate, the parser changed, the ranking cut it — its
+        chunks stay behind and remain retrievable. Agents then cite evidence
+        from documents the system no longer holds, which is exactly what
+        validate_run's "quotes appear in the source documents" check catches:
+        a real quote, from a real filing, that no ingested document contains.
+
+        Refuses to run on an empty keep-set: a period whose fetch failed must
+        not be interpreted as "this period has no documents, delete everything".
+        """
+        if not keep_doc_ids:
+            logger.debug(f"prune_period({ticker} {quarter} {fiscal_year}): empty keep-set, skipping.")
+            return 0
+
+        try:
+            found = self._col.get(
+                where={"$and": [
+                    {"ticker": ticker},
+                    {"quarter": quarter},
+                    {"fiscal_year": str(fiscal_year)},
+                ]},
+                include=["metadatas"],
+            )
+        except Exception as e:
+            logger.warning(f"prune_period lookup failed for {ticker} {quarter} {fiscal_year}: {e}")
+            return 0
+
+        ids   = found.get("ids") or []
+        metas = found.get("metadatas") or []
+        stale = [
+            cid for cid, meta in zip(ids, metas)
+            if (meta or {}).get("doc_id") not in keep_doc_ids
+        ]
+        if not stale:
+            return 0
+
+        try:
+            self._col.delete(ids=stale)
+        except Exception as e:
+            logger.warning(f"prune_period delete failed for {ticker} {quarter} {fiscal_year}: {e}")
+            return 0
+
+        orphan_docs = {
+            (m or {}).get("doc_id") for c, m in zip(ids, metas) if c in set(stale)
+        }
+        logger.info(
+            f"[prune] {ticker} {quarter} {fiscal_year}: removed {len(stale)} orphaned "
+            f"chunk(s) from {len(orphan_docs)} document(s) no longer ingested."
+        )
+        return len(stale)
 
     def count(self, ticker: str) -> int:
         try:

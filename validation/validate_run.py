@@ -36,7 +36,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from store.signal_store import SignalStore  # noqa: E402
+from store.signal_store import SignalStore
+from models import normalize_quote_text  # noqa: E402
 
 # ── Reporting ────────────────────────────────────────────────────────────────
 
@@ -121,10 +122,19 @@ class Report:
 
 
 def _norm(s: str) -> str:
-    """Whitespace/quote-insensitive form for substring comparison."""
-    s = (s or "").replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip().strip('"\'').lower()
+    """
+    Whitespace/typography-insensitive form for substring comparison.
+
+    Delegates to models.normalize_quote_text so the auditor and the agents share
+    one definition of "verbatim". This local version previously folded curly
+    quotes but not ligatures, en/em dashes or non-breaking spaces, so a quote
+    reproduced perfectly from a PDF could still be reported as missing purely
+    because the source rendered "fi" as a ligature.
+
+    Still punctuation- and word-sensitive: a quote that only matches once
+    punctuation is ignored is not verbatim, and this check exists to say so.
+    """
+    return normalize_quote_text(s)
 
 
 def _period(row: dict) -> str:

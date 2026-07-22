@@ -240,7 +240,20 @@ class SignalStore:
         """, [
             doc_id, ticker, company, doc_type, quarter, fiscal_year,
             source_url, title, chunk_count, datetime.utcnow(),
-            raw_text[:50000] if raw_text else "",   # cap at 50k chars
+            raw_text[: settings.DOC_MAX_CHARS] if raw_text else "",
+            # This cap MUST NOT be lower than the one the fetcher applies when
+            # building SourceDocument.raw_text — they are now the same setting.
+            #
+            # They used to differ: the fetcher kept DOC_MAX_CHARS characters and
+            # the chunker chunked all of them, while this column stored only the
+            # first 50,000. Chunks built from the text beyond that point quoted
+            # the filing perfectly but matched nothing in the stored copy, so
+            # validate_run reported "quote does not appear in any ingested
+            # document" — a provenance failure invented entirely by two
+            # independent truncation limits.
+            #
+            # The invariant: whatever text gets chunked is exactly the text kept
+            # for verification. One cap, one place.
         ])
 
     # ── Query methods ─────────────────────────────────────────────────────────

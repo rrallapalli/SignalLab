@@ -29,7 +29,7 @@ from typing import Optional
 import httpx
 from dateutil import parser as dtparser
 from loguru import logger
-from pypdf import PdfReader
+from ingestion import parser
 
 from bse import BSE
 from nse import NSE
@@ -313,9 +313,46 @@ def _bse_event_date(item: dict) -> Optional[datetime]:
     return None
 
 
-async def _download_pdf_text(client: httpx.AsyncClient, urls: list[str]) -> str:
-    """Try each candidate URL (BSE has both a 'live' and 'historical' path) until one works."""
+async def _download_pdf_text(
+    client: httpx.AsyncClient, urls: list[str], doc_type: str | None = None
+) -> str:
+    """
+    Try each candidate URL (BSE has both a 'live' and 'historical' path) until
+    one works, and return its extracted text.
+
+    The parse cache is consulted BEFORE the network call: parsing is the most
+    expensive step per document and its output never changes, so a re-run of the
+    same ticker should neither re-download nor re-parse anything it has already
+    seen. Extraction itself is layout-aware (Docling) rather than a flat text
+    dump, so tables survive into the chunker with their rows intact.
+    """
+    # Cache first — a hit means no download at all.
     for url in urls:
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        cached = parser.cache_get(url)
+        if cached:
+            logger.debug(f"[parse-cache] hit {url[-40:]} ({len(cached)} chars)")
+            return cached
+
+    # Raw bytes we already downloaded, even if the parsed text is stale (a page
+    # limit or parser bump). Re-parsing then costs no network at all.
+    for url in urls:
+        if not url:
+            continue
+        raw = parser.pdf_cache_get(url)
+        if raw:
+            name = url.rsplit("/", 1)[-1][:80] or "document.pdf"
+            text, how = await asyncio.to_thread(
+                parser.extract_text_cached, raw, url, name, doc_type
+            )
+            if text:
+                logger.debug(f"[pdf-cache] hit {name} — re-parsed locally (how={how})")
+                return text
+
+    for url in urls:
+        if not url or not url.startswith(("http://", "https://")):
+            continue
         try:
             resp = await client.get(
                 url,
@@ -330,11 +367,21 @@ async def _download_pdf_text(client: httpx.AsyncClient, urls: list[str]) -> str:
             )
             if resp.status_code != 200 or not resp.content:
                 continue
-            reader = PdfReader(io.BytesIO(resp.content))
-            text = "\n".join((page.extract_text() or "") for page in reader.pages[:60])
-            text = text.strip()
+
+            # Parsing is CPU-bound (layout model + optional OCR); keep it off the
+            # event loop or it stalls every other concurrent download.
+            parser.pdf_cache_put(url, resp.content)
+            name = url.rsplit("/", 1)[-1][:80] or "document.pdf"
+            text, how = await asyncio.to_thread(
+                parser.extract_text_cached, resp.content, url, name, doc_type
+            )
             if text:
+                if how in ("docling+ocr", "docling+ocr-thin"):
+                    # Worth surfacing: these are documents pypdf would have
+                    # returned nothing for, and which used to be silently dropped.
+                    logger.info(f"[parse] Recovered scanned document via OCR: {name}")
                 return text
+            logger.debug(f"[parse] No usable text from {url[-60:]} (how={how})")
         except Exception as e:
             logger.debug(f"PDF extract failed {url}: {e}")
             continue
@@ -397,18 +444,21 @@ async def fetch_all_periods(
     span_end   = max(_search_window(q, y, doc_types_set)[1] for q, y in wanted)
 
     nse: Optional[NSE] = None
-    for attempt in range(3):
-        try:
-            nse = await asyncio.to_thread(NSE, download_folder=str(settings.NSE_CACHE_DIR))
-            break
-        except Exception as e:
-            if attempt == 2:
-                logger.warning(
-                    f"NSE client init failed after 3 attempts (cookie handshake blocked?) "
-                    f"— NSE filings will be skipped: {e}"
-                )
-            else:
-                await asyncio.sleep(2 * (attempt + 1))
+    if not settings.USE_NSE:
+        logger.debug("[fetch] NSE disabled (USE_NSE=false) — using BSE only.")
+    else:
+        for attempt in range(3):
+            try:
+                nse = await asyncio.to_thread(NSE, download_folder=str(settings.NSE_CACHE_DIR))
+                break
+            except Exception as e:
+                if attempt == 2:
+                    logger.warning(
+                        f"NSE client init failed after 3 attempts (cookie handshake blocked?) "
+                        f"— NSE filings will be skipped: {e}"
+                    )
+                else:
+                    await asyncio.sleep(2 * (attempt + 1))
 
     bse = BSE(download_folder=str(settings.BSE_CACHE_DIR))
 
@@ -488,12 +538,41 @@ async def fetch_all_periods(
 
     # Download every kept candidate ONCE (flattened), then distribute to buckets.
     flat = [c for p in wanted for c in docs_by_period[p]]
+
+    # Load the parser's models once, on this thread, before fanning out. The
+    # converter is now a locked singleton, so concurrent parses would queue
+    # behind one load anyway — doing it here makes that wait explicit and
+    # keeps it out of the per-document timings.
+    if flat:
+        await asyncio.to_thread(parser.warm_up)
     async with httpx.AsyncClient() as client:
-        texts = await asyncio.gather(*[_download_pdf_text(client, c["urls"]) for c in flat])
+        texts = await asyncio.gather(*[
+            _download_pdf_text(client, c["urls"], c["doc_type"].value) for c in flat
+        ])
+
+    # Content-level dedupe. URL dedupe (above) cannot see that NSE and BSE serve
+    # the SAME filing under different URLs — NSE with a readable filename, BSE
+    # with a UUID. Both survived as separate documents, were chunked and embedded
+    # separately, and handed the agents the same statement two or three times,
+    # which reads as independent sources corroborating each other. Neither
+    # validate_run check catches it: the copies sit inside one period, so
+    # "one document, one period" and "disjoint evidence" both still pass.
+    seen_hashes: dict[str, str] = {}
+    duplicates = 0
 
     for c, text in zip(flat, texts):
         if len(text) < 200:
             continue
+
+        content_hash = hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
+        if content_hash in seen_hashes:
+            duplicates += 1
+            logger.debug(
+                f"[fetch] Duplicate content: {c['urls'][0][-45:]} is identical to "
+                f"{seen_hashes[content_hash][-45:]} — keeping one copy."
+            )
+            continue
+        seen_hashes[content_hash] = c["urls"][0]
         q_label, yr = c["period"]
         url = c["urls"][0]
         buckets[c["period"]].append(SourceDocument(
@@ -501,10 +580,15 @@ async def fetch_all_periods(
             ticker=ticker, company=company, doc_type=c["doc_type"],
             quarter=q_label, fiscal_year=yr,
             event_date=c["event_date"], source_url=url,
-            title=c["subject"][:200], raw_text=text[:30000],
+            title=c["subject"][:200], raw_text=text[: settings.DOC_MAX_CHARS],
         ))
 
     total = sum(len(v) for v in buckets.values())
+    if duplicates:
+        logger.info(
+            f"[fetch] Dropped {duplicates} duplicate document(s) served under more "
+            f"than one URL (typically the same filing from both NSE and BSE)."
+        )
     logger.success(
         f"Fetched {total} documents for {ticker} across {len(wanted)} period(s) "
         f"[{', '.join(f'{q} {y}:{len(buckets[(q,y)])}' for q, y in wanted)}] "

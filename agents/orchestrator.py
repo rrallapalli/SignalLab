@@ -156,6 +156,21 @@ async def _embed_period_docs(
     fetch_all_periods — so a given PDF can only ever reach one period here.
     """
     label = label or format_period(quarter, year)
+
+    # Drop chunks from documents that are no longer part of this period's
+    # corpus BEFORE embedding the current set. Without this, a document that
+    # stops being ingested (dropped as a duplicate, re-parsed under a different
+    # id, cut by ranking) leaves its chunks behind, still retrievable — and
+    # agents go on citing evidence that no ingested document contains.
+    try:
+        vs.prune_period(
+            ticker=docs[0].ticker if docs else "",
+            quarter=quarter, fiscal_year=year,
+            keep_doc_ids={d.doc_id for d in docs},
+        )
+    except Exception as e:
+        logger.warning(f"[ingest] Prune failed for {label}: {e}")
+
     total_chunks = 0
     for doc in docs:
         try:

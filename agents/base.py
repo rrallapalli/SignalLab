@@ -89,24 +89,38 @@ class BaseAgent:
         doc_types: list[str] | None = None,
         sections: list[str] | None = None,
         management_only: bool = False,
-        top_k_per_query: int = 8,
+        top_k_per_query: int | None = None,
+        final_k: int | None = None,
+        use_rerank: bool = True,
     ) -> list[tuple[Any, float]]:
         """
         Multi-query RAG retrieval. Deduplicates by chunk_id keeping
-        highest relevance score.
+        highest relevance score, then (optionally) reranks with a cross-encoder.
 
         Pass `fiscal_year` whenever you pass `quarter`. Quarter alone is not a
         period: "Q1" matches Q1 of every year in the store, so a Q1-2026 query
         silently pulls Q1-2025 evidence too. For several periods at once, pass
         `periods=[(quarter, year), ...]`.
+
+        Two-stage retrieval: the vector store proposes a WIDE candidate set
+        (cheap, intent-blind), then a cross-encoder picks the few that actually
+        answer the query (expensive, intent-aware). Widening only pays off
+        because chunk_id is now persisted — while every chunk of a document
+        shared one id, dedup collapsed each document to a single chunk and a
+        bigger top-k changed nothing.
         """
+        rerank_on = use_rerank and settings.RERANK_ENABLED
+        per_query = top_k_per_query or (
+            settings.RERANK_CANDIDATES_PER_QUERY if rerank_on else 8
+        )
+
         seen: dict[str, tuple[Any, float]] = {}
 
         for q in queries:
             try:
                 results = self.vs.retrieve(
                     query=q, ticker=ticker,
-                    n_results=top_k_per_query,
+                    n_results=per_query,
                     quarter=quarter,
                     fiscal_year=fiscal_year,
                     periods=periods,
@@ -121,7 +135,23 @@ class BaseAgent:
             except Exception as e:
                 logger.warning(f"RAG query failed ('{q[:40]}'): {e}")
 
-        return sorted(seen.values(), key=lambda x: x[1], reverse=True)
+        ordered = sorted(seen.values(), key=lambda x: x[1], reverse=True)
+        if not rerank_on or not ordered:
+            return ordered
+
+        top_n = final_k or settings.RERANK_TOP_N
+        try:
+            from retrieval.reranker import rerank as _rerank
+            reranked = _rerank(queries, ordered, top_n)
+            logger.debug(
+                f"[rerank] {len(ordered)} candidates → top {len(reranked)} "
+                f"for {len(queries)} quer{'y' if len(queries)==1 else 'ies'}"
+            )
+            return reranked
+        except Exception as e:
+            # Never let ranking take down retrieval — unranked evidence beats none.
+            logger.warning(f"[rerank] Unavailable ({e}); using vector order.")
+            return ordered[:top_n]
 
     def format_evidence(
         self,

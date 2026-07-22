@@ -13,8 +13,11 @@ auto-detected from the company name / ticker unless explicitly passed in.
 
 from __future__ import annotations
 
+import unicodedata
+
 from loguru import logger
-from models import Citation, NarrativeSignal, ThemeSignal, ThemeStatus
+from models import (Citation, NarrativeSignal, ThemeSignal, ThemeStatus,
+                    normalize_quote_text)
 from agents.base import BaseAgent, safe_float, safe_int
 from store.vector_store import VectorStore
 
@@ -401,24 +404,50 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
             # and dropped if it isn't there. Citation.quote is extracted by code
             # from chunk.text and is verbatim by construction; key_quotes come
             # out of the model's JSON and are not.
-            _evidence_norm = " ".join(
-                (getattr(c, "text", "") or "") for c, _ in (current_chunks + prior_chunks)
+            #
+            # The check must reject PARAPHRASE without rejecting faithful
+            # quotes that merely differ in TYPOGRAPHY. Two things were causing
+            # real evidence to be thrown away:
+            #
+            #  1. Chunks were concatenated in RELEVANCE order, so a quote
+            #     spanning two adjacent passages was split by an unrelated chunk
+            #     and became unfindable. They are joined in document order
+            #     (doc_id, char_start), which restores contiguity.
+            #  2. PDFs carry curly quotes, en/em dashes and ligatures ("ﬁnal");
+            #     the model emits ASCII equivalents, so a byte-exact match
+            #     failed on an otherwise perfect quote.
+            #
+            # normalize_quote_text handles (2) and is THE shared definition of
+            # verbatim — validate_run audits stored quotes with the same
+            # function. An earlier version of this check also ignored
+            # punctuation, which let through quotes where the model had dropped
+            # a comma; the validator then flagged them as appearing in no
+            # source document. A quote that needs punctuation ignored in order
+            # to match is not verbatim, so it is dropped here instead.
+            _ordered_chunks = sorted(
+                (c for c, _ in (current_chunks + prior_chunks)),
+                key=lambda c: (getattr(c, "doc_id", "") or "",
+                               getattr(c, "char_start", 0) or 0),
             )
-            _evidence_norm = " ".join(_evidence_norm.split()).lower()
+            _evidence_norm = normalize_quote_text(" ".join(
+                (getattr(c, "text", "") or "") for c in _ordered_chunks
+            ))
 
             def _verified_quotes(raw: list) -> list[str]:
                 out = []
                 for q in (raw or [])[:2]:
                     if not isinstance(q, str):
                         continue
-                    needle = " ".join(q.split()).lower().strip(' "\'“”')
-                    if len(needle) >= 15 and needle in _evidence_norm:
+                    needle = normalize_quote_text(q)
+                    if len(needle) < 15:
+                        continue
+                    if needle in _evidence_norm:
                         out.append(q)
-                    else:
-                        logger.warning(
-                            f"[NarrativeAgent] Dropped unverifiable key_quote "
-                            f"(not found in source text): {q[:70]!r}"
-                        )
+                        continue
+                    logger.warning(
+                        f"[NarrativeAgent] Dropped unverifiable key_quote "
+                        f"(not found in source text): {q[:70]!r}"
+                    )
                 return out
 
             themes = []

@@ -7,6 +7,9 @@ Two families:
 """
 
 from __future__ import annotations
+
+import re
+import unicodedata
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
@@ -298,3 +301,36 @@ class SignalBundle(BaseModel):
     risk:        Optional[RiskSignal]        = None
 
     errors:      list[str] = Field(default_factory=list)
+
+
+def normalize_quote_text(s: str) -> str:
+    """
+    Canonical form for checking that a quote appears in source text.
+
+    THE SINGLE DEFINITION OF "VERBATIM" for this codebase. The narrative agent
+    uses it to decide whether to keep a model-supplied key_quote; validate_run
+    uses it to audit stored quotes against ingested documents. They must agree —
+    when they didn't, the agent kept quotes the validator then reported as
+    appearing in no document, and the run was marked NOT TRUSTWORTHY for quotes
+    that were, by the agent's own looser standard, fine.
+
+    Insensitive to TYPOGRAPHY only:
+      - ligatures and compatibility forms (NFKD: "ﬁnal" -> "final")
+      - curly quotes, en/em dashes, minus sign, non-breaking space
+      - whitespace runs and case
+
+    Deliberately SENSITIVE to punctuation and wording. Dropping a comma is not a
+    rendering difference, it is a different sentence; a quote that needs
+    punctuation ignored to match is not verbatim, and evidence that must be
+    loosened to pass is exactly what this check exists to catch.
+    """
+    s = unicodedata.normalize("NFKD", s or "")
+    for a, b in (
+        ("\u2018", "'"), ("\u2019", "'"), ("\u201a", "'"), ("\u201b", "'"),
+        ("\u201c", '"'), ("\u201d", '"'), ("\u201e", '"'), ("\u2033", '"'),
+        ("\u2013", "-"), ("\u2014", "-"), ("\u2212", "-"), ("\u2010", "-"),
+        ("\u00a0", " "), ("\u2009", " "), ("\u202f", " "),
+    ):
+        s = s.replace(a, b)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip().strip('"\'').lower()
