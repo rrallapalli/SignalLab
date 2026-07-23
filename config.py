@@ -15,6 +15,15 @@ class Settings:
     OPENAI_MODEL:     str = os.getenv("OPENAI_MODEL", "gpt-4o")
     EMBED_MODEL:      str = os.getenv("EMBED_MODEL", "text-embedding-3-small")
     OPENAI_TEMPERATURE: float = float(os.getenv("OPENAI_TEMPERATURE", "0.0"))
+    # temperature=0 is not determinism. It removes deliberate sampling, but the
+    # API still batches requests and reduces floats in a non-fixed order, so the
+    # same prompt can return a slightly different score run to run — enough to
+    # flip a `tone` or `severity` label sitting on a threshold. `seed` asks the
+    # API for a repeatable draw; it is best-effort, and only holds while
+    # system_fingerprint (logged per call) is unchanged. Set to empty to omit.
+    OPENAI_SEED: int | None = (
+        int(os.getenv("OPENAI_SEED")) if os.getenv("OPENAI_SEED", "").strip() else 7
+    )
 
     # ── NSE / BSE direct fetch (no API key required — public endpoints) ───────
     # How many days after a quarter-end to keep searching for results /
@@ -52,18 +61,6 @@ class Settings:
     # "auto" uses the GPU (MPS on Apple Silicon) wherever the model supports it
     # and CPU where it does not — usually the single biggest parsing speedup on
     # a Mac. Force "cpu" only if a model misbehaves on MPS.
-    # Only these document types get layout parsing. Earnings-call transcripts
-    # are long, prose-heavy and contain almost no tables — pypdf reads them
-    # fine and in a fraction of the time, and they are usually the biggest
-    # files in a quarter. Spending the layout budget on presentations and
-    # results releases, where the tables actually live, is where it pays.
-    # Empty string = every type gets Docling.
-    DOCLING_DOC_TYPES:  set  = {
-        t.strip() for t in os.getenv(
-            "DOCLING_DOC_TYPES",
-            "investor_presentation,press_release,management_commentary"
-        ).split(",") if t.strip()
-    }
     DOCLING_DEVICE:     str  = os.getenv("DOCLING_DEVICE", "auto")
     # Threads PER parse. Total load is PARSE_CONCURRENCY x this, so keep the
     # product at or below your core count or the parses fight each other.
@@ -106,6 +103,14 @@ class Settings:
     # Cross-encoder cost is queries x candidates; cap it so a many-query agent
     # cannot stall the pipeline on a laptop CPU.
     RERANK_MAX_PAIRS:   int  = int(os.getenv("RERANK_MAX_PAIRS", "500"))
+    # RERANK_MODEL is downloaded from HuggingFace on first use. When that fails
+    # — no network, cold cache, memory pressure — rerank_retrieve() falls back
+    # to raw vector order, which is a materially different evidence set for the
+    # same query. corpus_fingerprint() cannot see that, so the cache will call
+    # the resulting signal "current" and never re-score it. Set this true to
+    # make the failure loud instead of silent: better no signal than a signal
+    # whose provenance you cannot reconstruct.
+    RERANK_REQUIRED:    bool = os.getenv("RERANK_REQUIRED", "false").lower() == "true"
 
     # ── Storage ───────────────────────────────────────────────────────────────
     DATA_DIR:         Path = BASE_DIR / "data"

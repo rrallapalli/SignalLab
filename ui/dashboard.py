@@ -698,8 +698,15 @@ if run_btn:
         )
         st.stop()
 
-    status_box = st.status("🔍 Fetching documents for 3 quarters…", expanded=True, state="running")
-    progress   = st.progress(0, text="Starting…")
+    # A plain container, not st.status(). st.status() renders a collapsible
+    # <details>; once the user clicks it shut, the frontend keeps that collapsed
+    # state across reruns and the expanded=True argument no longer wins. Since
+    # this log should always be visible, there is simply no collapse affordance:
+    # a header placeholder carries the state text, the container carries the log.
+    status_head = st.empty()
+    status_head.markdown("🔍 **Fetching documents for 3 quarters…**")
+    status_box  = st.container(border=True)
+    progress    = st.progress(0, text="Starting…")
 
     # ── Live progress ─────────────────────────────────────────────────────────
     # The pipeline runs in a worker thread and reports ordered stage events
@@ -747,9 +754,9 @@ if run_btn:
 
                 if ev == "pipeline_start":
                     progress.progress(5, text="Starting…")
-                    status_box.update(
-                        label=f"🔍 {detail['ticker']} — {detail['latest']} · "
-                              f"{detail['qoq']} (QoQ) · {detail['yoy']} (YoY)"
+                    status_head.markdown(
+                        f"🔍 **{detail['ticker']}** — {detail['latest']} · "
+                        f"{detail['qoq']} (QoQ) · {detail['yoy']} (YoY)"
                     )
                 elif ev == "ingest_start":
                     progress.progress(12, text="Fetching documents…")
@@ -787,9 +794,9 @@ if run_btn:
 
         result = outcome["result"]
 
-        status_box.update(
-            label=f"✅ Complete — {result['latest_label']} vs {result['qoq_label']} vs {result['yoy_label']}",
-            state="complete", expanded=False,
+        status_head.markdown(
+            f"✅ **Complete** — {result['latest_label']} vs "
+            f"{result['qoq_label']} vs {result['yoy_label']}"
         )
         for e in result.get("errors",[]):
             if e: st.warning(e)
@@ -799,7 +806,7 @@ if run_btn:
 
     except Exception as e:
         progress.empty()
-        status_box.update(label="❌ Pipeline failed", state="error", expanded=True)
+        status_head.markdown("❌ **Pipeline failed**")
         st.error(f"**Error:** {e}")
         st.info(
             "Check your `.env` has a valid `OPENAI_API_KEY`, that the ticker is a valid "

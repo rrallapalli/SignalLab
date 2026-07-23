@@ -142,10 +142,83 @@ class SignalStore:
             except Exception:
                 pass   # column already exists
         logger.info(f"SignalStore ready at {self.db_path}")
+        self._repair_legacy_signal_ids()
 
-    def _sig_id(self, prefix: str, ticker: str, quarter: str) -> str:
-        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        return f"{prefix}::{ticker}::{quarter}::{ts}"
+    # Table → id prefix, matching _sig_id().
+    _SIGNAL_TABLES = {
+        "confidence_signals": "conf",
+        "narrative_signals":  "narr",
+        "guidance_signals":   "guid",
+        "risk_signals":       "risk",
+    }
+
+    def _repair_legacy_signal_ids(self) -> None:
+        """
+        One-time repair for databases written while _sig_id() carried a
+        timestamp.
+
+        Those ids were unique per save, so INSERT OR REPLACE never replaced and
+        every re-score appended. Two things need fixing, in order:
+
+          1. Collapse duplicates, keeping the newest row per period. The older
+             copies are superseded signals, not history — the fingerprint in
+             signal_runs already decides when a re-score was warranted.
+          2. Re-key the survivors to the natural id, otherwise the next save
+             writes a *different* key and the duplicate immediately comes back.
+
+        Idempotent and cheap: after the first run every id already matches, the
+        guard query finds nothing, and this returns without writing.
+        """
+        for table, prefix in self._SIGNAL_TABLES.items():
+            natural = (
+                f"'{prefix}::' || ticker || '::' || quarter || '::' || "
+                f"COALESCE(CAST(fiscal_year AS VARCHAR), 'unknown')"
+            )
+            try:
+                stale = self._conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE id <> {natural}"
+                ).fetchone()[0]
+                if not stale:
+                    continue
+
+                self._conn.execute(f"""
+                    DELETE FROM {table} WHERE id NOT IN (
+                        SELECT id FROM (
+                            SELECT id, ROW_NUMBER() OVER (
+                                PARTITION BY ticker, quarter, fiscal_year
+                                ORDER BY generated_at DESC NULLS LAST, id DESC
+                            ) AS rn
+                            FROM {table}
+                        ) ranked WHERE rn = 1
+                    )
+                """)
+                self._conn.execute(f"UPDATE {table} SET id = {natural}")
+                logger.info(
+                    f"[store] Repaired {table}: collapsed {stale} legacy "
+                    f"timestamped row(s) to one row per period."
+                )
+            except Exception as e:   # noqa: BLE001 — never block startup on repair
+                logger.warning(f"[store] Could not repair {table} ids: {e}")
+
+    def _sig_id(self, prefix: str, ticker: str, quarter: str,
+                fiscal_year: int | str | None) -> str:
+        """
+        The natural key of a signal: one row per (kind, ticker, period).
+
+        This deliberately carries no timestamp. It used to, and that quietly
+        disabled every `INSERT OR REPLACE` in this file — a fresh key on each
+        save meant nothing was ever replaced, so a re-scored period appended a
+        second row instead of superseding the first. `_row_for_period()` then
+        read back whichever row DuckDB happened to return, so a period that had
+        legitimately re-scored (new filing, bumped SIGNAL_VERSION) could still
+        display its pre-update signal. Last write wins is the semantics the
+        fingerprint gate in `is_signal_current()` already assumes.
+
+        fiscal_year is part of the key, not decoration: without it Q3 FY25 and
+        Q3 FY26 are the same row.
+        """
+        fy = "unknown" if fiscal_year is None else fiscal_year
+        return f"{prefix}::{ticker}::{quarter}::{fy}"
 
     # ── Save methods ──────────────────────────────────────────────────────────
 
@@ -159,7 +232,7 @@ class SignalStore:
                  tone, drivers, summary, citations)
             VALUES (?,?,?,?,?,?, ?,?,?, ?,?,?, ?,?,?, ?,?,?,?)
         """, [
-            self._sig_id("conf", sig.ticker, sig.quarter),
+            self._sig_id("conf", sig.ticker, sig.quarter, sig.fiscal_year),
             sig.ticker, sig.company, sig.quarter, sig.fiscal_year, sig.generated_at,
             sig.score, sig.previous_score, sig.change,
             sig.confidence_level, sig.uncertainty_level, sig.defensiveness,
@@ -179,7 +252,7 @@ class SignalStore:
                  overall_shift, shift_summary, citations)
             VALUES (?,?,?,?,?,?, ?,?,?,?,?, ?,?,?)
         """, [
-            self._sig_id("narr", sig.ticker, sig.quarter),
+            self._sig_id("narr", sig.ticker, sig.quarter, sig.fiscal_year),
             sig.ticker, sig.company, sig.quarter, sig.fiscal_year, sig.generated_at,
             _j([t.model_dump() for t in sig.themes]),
             _j(sig.accelerating), _j(sig.emerging),
@@ -197,7 +270,7 @@ class SignalStore:
                  recent_pattern, summary, citations)
             VALUES (?,?,?,?,?,?, ?,?,?, ?,?,?,?,?, ?,?,?)
         """, [
-            self._sig_id("guid", sig.ticker, sig.quarter),
+            self._sig_id("guid", sig.ticker, sig.quarter, sig.fiscal_year),
             sig.ticker, sig.company, sig.quarter, sig.fiscal_year, sig.generated_at,
             sig.score,
             _j([g.model_dump() for g in sig.guidance_items]),
@@ -216,7 +289,7 @@ class SignalStore:
                  overall_risk_direction, summary, citations)
             VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?)
         """, [
-            self._sig_id("risk", sig.ticker, sig.quarter),
+            self._sig_id("risk", sig.ticker, sig.quarter, sig.fiscal_year),
             sig.ticker, sig.company, sig.quarter, sig.fiscal_year, sig.generated_at,
             _j([r.model_dump() for r in sig.risks]),
             _j(sig.new_risks), _j(sig.escalating), _j(sig.diminishing),
@@ -401,8 +474,13 @@ class SignalStore:
 
     def _row_for_period(self, table: str, ticker: str, quarter: str,
                         fiscal_year: int) -> dict | None:
+        # ORDER BY is not decoration. Deterministic ids mean there should only
+        # ever be one row per period, but databases written before that fix
+        # still hold appended duplicates, and DuckDB promises no ordering for a
+        # bare SELECT. Newest-first makes the stale copy unreachable either way.
         cur = self._conn.execute(
-            f"SELECT * FROM {table} WHERE ticker = ? AND quarter = ? AND fiscal_year = ?",
+            f"SELECT * FROM {table} WHERE ticker = ? AND quarter = ? AND fiscal_year = ? "
+            f"ORDER BY generated_at DESC NULLS LAST LIMIT 1",
             [ticker, quarter, fiscal_year],
         )
         rows = cur.fetchall()
@@ -455,6 +533,7 @@ class SignalStore:
     def corpus_fingerprint(
         self, ticker: str, quarter: str, fiscal_year: int,
         model: str, signal_version: str,
+        retrieval_profile: str = "",
     ) -> str:
         """
         A stable hash of everything that determines a period's signal.
@@ -469,13 +548,22 @@ class SignalStore:
           · doc_ids + chunk_counts — the evidence itself
           · model                  — gpt-4o and gpt-4o-mini do not agree
           · signal_version         — the agent logic
+          · retrieval_profile      — how evidence was selected
 
-        The last one is not optional. Q1 2025's filings have not changed since
+        signal_version is not optional. Q1 2025's filings have not changed since
         2025, but the signal stored against them was built with pooled
         cross-year evidence and an invented prior score. A fingerprint of the
         documents alone would call that "unchanged" and skip it forever, quietly
         preserving a wrong answer — which is the failure mode this whole codebase
         keeps producing. Bump SIGNAL_VERSION and every stored signal re-scores.
+
+        retrieval_profile is the same argument one layer down. Turning the
+        reranker on, or pointing it at a different cross-encoder, changes which
+        twelve chunks reach the prompt out of a couple of hundred candidates —
+        same documents, same model, different evidence, different score. Without
+        it in the hash, flipping RERANK_ENABLED leaves every stored signal
+        looking current and the change never takes effect on anything already
+        scored.
         """
         rows = self._conn.execute("""
             SELECT doc_id, chunk_count FROM ingested_documents
@@ -485,6 +573,7 @@ class SignalStore:
 
         payload = "|".join(f"{d}:{c}" for d, c in rows)
         payload += f"||model={model}||agents={signal_version}"
+        payload += f"||retrieval={retrieval_profile}"
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     def is_signal_current(

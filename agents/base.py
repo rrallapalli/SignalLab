@@ -68,15 +68,29 @@ class BaseAgent:
         user's choice would silently change the model mid-run for the first.
         """
         self.vs = vector_store
-        self.llm = ChatOpenAI(
-            model=model or settings.OPENAI_MODEL,
-            temperature=settings.OPENAI_TEMPERATURE,
-            api_key=settings.OPENAI_API_KEY,
+        self.model_name = model or settings.OPENAI_MODEL
+        # What retrieval actually did on the last rag_retrieve() call. Read it
+        # after scoring: "reranked" and "vector_order" are different evidence
+        # sets, and a signal built on the degraded path should not be cached as
+        # if it were built on the good one.
+        self.retrieval_mode: str = "unknown"
+        self.failed_queries: list[str] = []
+
+        model_kwargs: dict[str, Any] = {
             # Forces the API itself to guarantee syntactically valid JSON output,
             # instead of relying on the model voluntarily following "return only
             # JSON" prompt instructions (which occasionally breaks on embedded
             # quotes/apostrophes in quoted evidence text).
-            model_kwargs={"response_format": {"type": "json_object"}},
+            "response_format": {"type": "json_object"},
+        }
+        if settings.OPENAI_SEED is not None:
+            model_kwargs["seed"] = settings.OPENAI_SEED
+
+        self.llm = ChatOpenAI(
+            model=self.model_name,
+            temperature=settings.OPENAI_TEMPERATURE,
+            api_key=settings.OPENAI_API_KEY,
+            model_kwargs=model_kwargs,
         )
 
     def rag_retrieve(
@@ -115,6 +129,7 @@ class BaseAgent:
         )
 
         seen: dict[str, tuple[Any, float]] = {}
+        self.failed_queries = []
 
         for q in queries:
             try:
@@ -133,24 +148,57 @@ class BaseAgent:
                     if cid not in seen or score > seen[cid][1]:
                         seen[cid] = (chunk, score)
             except Exception as e:
+                self.failed_queries.append(q)
                 logger.warning(f"RAG query failed ('{q[:40]}'): {e}")
+
+        # "No chunk matched" and "every lookup errored" both used to arrive here
+        # as an empty list, and the agent scored the empty string either way —
+        # producing a number with no evidence under it, which is the one output
+        # this system must never emit. They are different conditions: the first
+        # is a fact about the corpus, the second is a broken vector store.
+        if queries and len(self.failed_queries) == len(queries):
+            raise RuntimeError(
+                f"All {len(queries)} retrieval queries failed for {ticker} "
+                f"({quarter or 'all quarters'}); refusing to score on no evidence. "
+                f"Last failure is logged above."
+            )
+        if self.failed_queries:
+            logger.warning(
+                f"[retrieve] {len(self.failed_queries)}/{len(queries)} queries failed "
+                f"for {ticker} — evidence is a partial set."
+            )
 
         ordered = sorted(seen.values(), key=lambda x: x[1], reverse=True)
         if not rerank_on or not ordered:
+            self.retrieval_mode = "vector_order" if ordered else "empty"
             return ordered
 
         top_n = final_k or settings.RERANK_TOP_N
         try:
             from retrieval.reranker import rerank as _rerank
             reranked = _rerank(queries, ordered, top_n)
+            self.retrieval_mode = "reranked"
             logger.debug(
                 f"[rerank] {len(ordered)} candidates → top {len(reranked)} "
                 f"for {len(queries)} quer{'y' if len(queries)==1 else 'ies'}"
             )
             return reranked
         except Exception as e:
-            # Never let ranking take down retrieval — unranked evidence beats none.
-            logger.warning(f"[rerank] Unavailable ({e}); using vector order.")
+            # Degrading to vector order is a real change of evidence, not a
+            # cosmetic one, and corpus_fingerprint() cannot detect it — so a
+            # signal scored on the fallback would be cached as though it came
+            # from the reranked path and never re-scored. Loud by default,
+            # fatal when the caller has asked for reproducibility.
+            if settings.RERANK_REQUIRED:
+                raise RuntimeError(
+                    f"Reranker unavailable ({e}) and RERANK_REQUIRED is set. "
+                    f"Refusing to score on a silently different evidence set."
+                ) from e
+            self.retrieval_mode = "vector_order_degraded"
+            logger.warning(
+                f"[rerank] Unavailable ({e}); using vector order. Evidence for this "
+                f"signal differs from a reranked run — treat scores as not comparable."
+            )
             return ordered[:top_n]
 
     def format_evidence(
@@ -189,6 +237,13 @@ class BaseAgent:
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_prompt),
             ])
+            # seed only guarantees a repeatable draw while the backend build is
+            # unchanged; OpenAI signals that with system_fingerprint. Logging it
+            # is what lets you tell "the model wandered" from "OpenAI shipped a
+            # new build" when a re-scored quarter comes back different.
+            fp = (getattr(resp, "response_metadata", {}) or {}).get("system_fingerprint")
+            if fp:
+                logger.debug(f"[llm] {self.model_name} system_fingerprint={fp}")
             raw = resp.content.strip()
             raw = re.sub(r"^```[a-z]*\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw)

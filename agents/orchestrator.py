@@ -88,6 +88,26 @@ def _noop_progress(event: str, detail: dict) -> None:
 SIGNAL_VERSION = "2026-07-17.2"
 
 
+def _retrieval_profile() -> str:
+    """
+    The retrieval settings that decide which chunks reach a prompt, as a stable
+    string for corpus_fingerprint().
+
+    Model and agent version were already fingerprinted; this closes the third
+    input. Two runs over identical documents with identical prompts still
+    produce different scores if one reranked 25 candidates per query down to 12
+    and the other took the raw vector top-12 — the reranker changes what the
+    agent reads, not just the order it reads it in.
+    """
+    if not settings.RERANK_ENABLED:
+        return "vector_order"
+    return (
+        f"rerank:{settings.RERANK_MODEL}"
+        f":cand{settings.RERANK_CANDIDATES_PER_QUERY}"
+        f":top{settings.RERANK_TOP_N}"
+    )
+
+
 def _prior_quarter(q: str, yr: int) -> tuple[str, int]:
     n = int(q[1])
     return (f"Q{n-1}", yr) if n > 1 else ("Q4", yr - 1)
@@ -317,7 +337,9 @@ async def _run_signals_for_quarter(
     # documents, the model AND SIGNAL_VERSION, so a prompt or scoring fix still
     # invalidates every period even though old filings never change.
     effective_model = model or settings.OPENAI_MODEL
-    fingerprint = ss.corpus_fingerprint(ticker, quarter, year, effective_model, SIGNAL_VERSION)
+    fingerprint = ss.corpus_fingerprint(
+        ticker, quarter, year, effective_model, SIGNAL_VERSION, _retrieval_profile()
+    )
 
     if ss.is_signal_current(ticker, quarter, year, fingerprint):
         stored = ss.get_period_signals(ticker, quarter, year)
@@ -341,11 +363,20 @@ async def _run_signals_for_quarter(
     logger.info(f"[signals] {ticker} {label}: running agents ({chunk_count} chunks available)")
 
     conf_sig = narr_sig = guid_sig = risk_sig = None
+    # Instances are held rather than created inside the lambda: each agent
+    # records how retrieval actually behaved (reranked vs degraded to vector
+    # order) on itself, and that has to be readable after run() returns.
+    agents = {
+        "confidence": ConfidenceAgent(vs, model),
+        "narrative":  NarrativeAgent(vs, model),
+        "guidance":   GuidanceAgent(vs, model),
+        "risk":       RiskAgent(vs, model),
+    }
     agent_defs = [
-        ("confidence", lambda: ConfidenceAgent(vs, model).run(ticker, company, quarter, year, prior_q, prior_yr)),
-        ("narrative",  lambda: NarrativeAgent(vs, model).run(ticker, company, quarter, year, prior_q, prior_yr)),
-        ("guidance",   lambda: GuidanceAgent(vs, model).run(ticker, company, quarter, year, all_periods)),
-        ("risk",       lambda: RiskAgent(vs, model).run(ticker, company, quarter, year, prior_q, prior_yr)),
+        ("confidence", lambda: agents["confidence"].run(ticker, company, quarter, year, prior_q, prior_yr)),
+        ("narrative",  lambda: agents["narrative"].run(ticker, company, quarter, year, prior_q, prior_yr)),
+        ("guidance",   lambda: agents["guidance"].run(ticker, company, quarter, year, all_periods)),
+        ("risk",       lambda: agents["risk"].run(ticker, company, quarter, year, prior_q, prior_yr)),
     ]
 
     for agent_name, agent_fn in agent_defs:
@@ -374,6 +405,27 @@ async def _run_signals_for_quarter(
 
         # Small gap between agents to stay within rate limits
         await asyncio.sleep(0.4)
+
+    # A degraded run reads a different evidence set than the fingerprint claims.
+    # The profile in the hash describes the CONFIGURED retrieval path; if the
+    # reranker was meant to run and could not, the resulting signals are not
+    # what that fingerprint stands for, and caching them would freeze a
+    # fallback-quality answer behind a "current" marker. Leave the period
+    # unmarked so a healthy run supersedes it. (RERANK_ENABLED=false is a
+    # different case entirely — that is vector order on purpose, it profiles as
+    # "vector_order", and it caches normally.)
+    degraded = sorted(
+        name for name, a in agents.items()
+        if getattr(a, "retrieval_mode", "") == "vector_order_degraded"
+    )
+    if degraded:
+        msg = (
+            f"{label}: reranker unavailable during {', '.join(degraded)} — scored on "
+            f"vector order instead. Signals kept but NOT cached; they will re-score "
+            f"once the reranker loads."
+        )
+        logger.warning(f"[signals] {msg}")
+        errors.append(msg)
 
     # Only record this period as scored if ALL FOUR agents succeeded. A partial
     # run must stay un-marked so the next run retries it — caching a failure is
