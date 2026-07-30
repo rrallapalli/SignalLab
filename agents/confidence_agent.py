@@ -206,10 +206,19 @@ PRIOR quarter, per the schema. Quote verbatim.
             tone = _tone_label(curr_feats)
             drivers = [f"{i.label}: {i.detail}"
                        for i in result.ledger.items if abs(i.delta) > 1e-9][:4]
-            summary = (f"Management confidence {result.value}/10 "
-                       f"({result.confidence} confidence)."
+            # "reliability" = how much to trust THIS reading (evidence
+            # sufficiency), deliberately NOT called "confidence": that word is
+            # the signal itself (management confidence), and "6.9 (high
+            # confidence)" beside "8.7 (medium confidence)" reads as a
+            # contradiction — a lower score looking more certain than a higher.
+            summary = (f"Management confidence {result.value}/10. "
+                       f"Read reliability: {result.confidence} "
+                       f"({result.confidence_reason})."
                        + (f" {drivers[0]}." if drivers else ""))
-            manifest = {**result.to_dict(), "sub_dimensions": subdims, "tone": tone}
+            _md = result.to_dict()
+            _md["reliability"] = _md.pop("confidence")
+            _md["reliability_reason"] = _md.pop("confidence_reason")
+            manifest = {**_md, "sub_dimensions": subdims, "tone": tone}
 
             return ConfidenceSignal(
                 ticker=ticker, company=company,

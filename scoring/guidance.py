@@ -36,7 +36,11 @@ class GuidanceFeatures:
     language_evidence: list[EvidenceRef] = field(default_factory=list)
 
 
-def _beat_rate(outcomes: list[str]) -> Optional[float]:
+def _hit_rate(outcomes: list[str]) -> Optional[float]:
+    """Share of tracked periods where management HIT its guidance (met or beat).
+    In-line counts as a hit: delivering what you guided is the point of guidance;
+    beating is a bonus, not the bar. This is the credibility basis — distinct
+    from a beats-only "beat rate", which measures how often they OVERSHOT."""
     tracked = [o for o in outcomes if o in OUTCOMES]
     if not tracked:
         return None
@@ -56,7 +60,7 @@ def _serial_miss(outcomes: list[str], n: int = 2) -> bool:
 def score_guidance(f: GuidanceFeatures,
                    ensemble_spread: Optional[float] = None) -> ScoreResult:
     L = ScoreLedger(baseline=50.0, lo=0.0, hi=100.0)
-    br = _beat_rate(f.outcomes)
+    br = _hit_rate(f.outcomes)
 
     if br is None:
         # No history: language-only, explicitly low-confidence, capped band.
@@ -76,7 +80,7 @@ def score_guidance(f: GuidanceFeatures,
             value=int(round(L.total)), ledger=L,
             confidence="low",
             confidence_reason="no reconciled guidance-vs-actuals history yet",
-            extras={"beat_rate": None, "tracked_periods": 0,
+            extras={"hit_rate": None, "tracked_periods": 0,
                     "serial_miss_risk": False},
         )
 
@@ -84,8 +88,8 @@ def score_guidance(f: GuidanceFeatures,
     L.baseline = 50.0 + (br - 0.5) * 80.0
     tracked = [o for o in f.outcomes if o in OUTCOMES]
     L.add("track_record", 0.0,
-          detail=f"met/beat {sum(o in ('beat','in_line') for o in tracked)}/"
-                 f"{len(tracked)} periods (beat_rate {br:.2f})",
+          detail=f"hit {sum(o in ('beat','in_line') for o in tracked)}/"
+                 f"{len(tracked)} guidance targets (hit rate {br:.2f})",
           evidence=f.outcome_evidence)  # baseline carries it; delta 0 documents it
 
     serial = _serial_miss(f.outcomes)
@@ -113,7 +117,7 @@ def score_guidance(f: GuidanceFeatures,
         signal="guidance", scorer_version=GUIDANCE_SCORING_VERSION,
         value=int(round(L.total)), ledger=L,
         confidence=conf, confidence_reason=reason,
-        extras={"beat_rate": round(br, 2), "tracked_periods": n_ev,
+        extras={"hit_rate": round(br, 2), "tracked_periods": n_ev,
                 "serial_miss_risk": serial,
                 "recent_pattern": tracked[-6:]},
     )

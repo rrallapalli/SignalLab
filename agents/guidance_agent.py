@@ -78,18 +78,22 @@ def _serial_miss_metrics(items: list) -> list[str]:
     return sorted(m for m, c in counts.items() if c >= 2)
 
 
-def _guidance_summary(value: int, met: int, tracked: int,
-                      beat_rate: float, serial: bool) -> str:
+def _guidance_summary(value: int, beats: int, in_line: int, misses: int,
+                      tracked: int, serial: bool) -> str:
     """
-    Summary generated from the computed result — never from the LLM. The old
-    LLM summary stated a score ("credibility score of 72/100"); now that the
-    score is computed here, an LLM-written number could contradict it, so the
-    headline is stated in code where it cannot drift.
+    Summary generated from the computed result — never from the LLM.
+
+    Reports the HIT rate (met or beat), which is what the score is based on, and
+    breaks out beats vs in-line separately. The old wording said "met or beat N
+    of N (beat rate 0.00)" — mixing the hit count with a beats-only rate, so a
+    company that hit every target read as "beat rate 0.00" beside a 95 score.
     """
+    met = beats + in_line
+    hit_rate = (met / tracked) if tracked else 0.0
     parts = [
         f"Guidance credibility {value}/100.",
-        f"Management met or beat guidance in {met} of {tracked} tracked "
-        f"period(s) (beat rate {beat_rate:.2f}).",
+        f"Hit {met} of {tracked} guidance targets ({hit_rate:.0%}): "
+        f"{beats} beat, {in_line} in-line, {misses} miss.",
     ]
     if serial:
         parts.append("Serial-miss risk flagged: a metric missed 2+ times.")
@@ -201,8 +205,7 @@ SUBSEQUENT quarters. Classify each trackable item's outcome.
             ))
 
             _serial_metrics = _serial_miss_metrics(items)
-            _beat_rate = round(_beats / _tracked, 3)
-            _met = _beats + _in_line
+            _beat_rate = round(_beats / _tracked, 3)   # beats-only (dashboard "Beat Rate")
             _recent_pattern = [i.outcome for i in items if i.outcome][:12]
 
             manifest = {
@@ -223,8 +226,8 @@ SUBSEQUENT quarters. Classify each trackable item's outcome.
                 beat_rate=_beat_rate,
                 serial_miss_risk=bool(_serial_metrics),
                 recent_pattern=_recent_pattern,
-                summary=_guidance_summary(result.value, _met, _tracked,
-                                          _beat_rate, bool(_serial_metrics)),
+                summary=_guidance_summary(result.value, _beats, _in_line,
+                                          _misses, _tracked, bool(_serial_metrics)),
                 citations=citations,
                 manifest=manifest,
             )
