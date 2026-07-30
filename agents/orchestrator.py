@@ -85,7 +85,17 @@ def _noop_progress(event: str, detail: dict) -> None:
 #                 both Q4 2025 and Q1 2026, so quarters scored duplicate
 #                 evidence. Every stored signal predates this and must
 #                 re-score — ingestion changed underneath them.
-SIGNAL_VERSION = "2026-07-17.2"
+#   2026-07-30.1  guidance credibility score is now computed deterministically
+#                 in code (scoring.guidance) from LLM-extracted outcomes rather
+#                 than judged by the LLM; the scoring ledger is persisted to
+#                 signal_manifests.
+#   2026-07-30.2  all four signals now score deterministically. Confidence 0–10
+#                 from extracted features (scoring.confidence) with derived
+#                 sub-dimensions; narrative theme status and risk status computed
+#                 in code from the counts the LLM extracts (severity stays an LLM
+#                 content assessment). Every stored signal predates this and must
+#                 re-score.
+SIGNAL_VERSION = "2026-07-30.2"
 
 
 def _retrieval_profile() -> str:
@@ -395,6 +405,15 @@ async def _run_signals_for_quarter(
             elif agent_name == "risk":
                 risk_sig = result
                 await _save_safe(ss.save_risk, result, f"{label}/risk", errors)
+
+            # Persist the deterministic scoring ledger (audit trail) for any
+            # agent that produced one. Guarded, so it is a no-op for agents not
+            # yet converted to deterministic scoring.
+            if getattr(result, "manifest", None) is not None:
+                try:
+                    ss.save_manifest(agent_name, result)
+                except Exception as e:
+                    logger.warning(f"[signals] {label}/{agent_name}: manifest save failed: {e}")
 
             logger.success(f"[signals] {ticker} {label}/{agent_name} ✅")
 

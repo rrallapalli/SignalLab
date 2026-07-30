@@ -144,6 +144,7 @@ class SignalBase(BaseModel):
     fiscal_year: int
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     citations:   list[Citation] = Field(default_factory=list)
+    manifest:    Optional[dict] = None   # deterministic scoring ledger (audit trail)
 
 
 # ── 1. Management Confidence ─────────────────────────────────────────────────

@@ -115,6 +115,16 @@ CREATE TABLE IF NOT EXISTS signal_runs (
     fingerprint   VARCHAR,               -- corpus + model + agent version
     generated_at  TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS signal_manifests (
+    id            VARCHAR PRIMARY KEY,   -- signaltype::ticker::quarter::fiscal_year
+    signal_type   VARCHAR NOT NULL,
+    ticker        VARCHAR NOT NULL,
+    quarter       VARCHAR NOT NULL,
+    fiscal_year   INTEGER,
+    generated_at  TIMESTAMP,
+    manifest      JSON
+);
 """
 
 # Migration: add raw_text to existing DBs that predate this column
@@ -296,6 +306,27 @@ class SignalStore:
             sig.overall_risk_direction,
             sig.summary,
             _j([c.model_dump() for c in sig.citations]),
+        ])
+
+    def save_manifest(self, signal_type: str, sig) -> None:
+        """
+        Persist a signal's deterministic scoring ledger for audit and replay.
+
+        Stored in its own table rather than as a column on each signal table, so
+        adding it touches nothing that already works. `sig.manifest` is None for
+        agents not yet converted to deterministic scoring — those are skipped.
+        """
+        m = getattr(sig, "manifest", None)
+        if m is None:
+            return
+        self._conn.execute("""
+            INSERT OR REPLACE INTO signal_manifests
+                (id, signal_type, ticker, quarter, fiscal_year, generated_at, manifest)
+            VALUES (?,?,?,?,?,?,?)
+        """, [
+            f"{signal_type}::{sig.ticker}::{sig.quarter}::{sig.fiscal_year}",
+            signal_type, sig.ticker, sig.quarter, sig.fiscal_year,
+            sig.generated_at, _j(m),
         ])
 
     def log_document(

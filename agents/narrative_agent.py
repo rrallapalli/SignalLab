@@ -307,8 +307,9 @@ and any others you observe that are clearly material to this company:
 For each theme:
 - Count evidence mentions in current vs prior quarter
 - Score sentiment (-1.0 to +1.0)
-- Classify status: accelerating | emerging | stable | fading | newly_risky | resolved
 - Write one-line interpretation
+(The theme's status and the accelerating/emerging/fading/newly_risky rollups are
+computed in code from these counts and sentiment — do not classify them here.)
 
 key_quotes MUST be copied VERBATIM, character for character, from the evidence
 above. Do not paraphrase, tidy, shorten, or compose them. If you cannot find an
@@ -322,33 +323,53 @@ Return ONLY valid JSON:
   "themes": [
     {{
       "theme": "Net Interest Margin (NIM) / Spread Compression",
-      "status": "newly_risky",
       "evidence_count_current": 12,
       "evidence_count_previous": 4,
-      "count_change": 8,
       "sentiment_current": -0.4,
       "sentiment_previous": 0.1,
-      "sentiment_change": -0.5,
       "interpretation": "Management flagged NIM compression from deposit repricing for the first time this quarter, versus a confident tone last quarter.",
       "key_quotes": ["We expect some NIM pressure as deposit costs catch up", "Margins should stabilize in the back half of the year"]
     }}
   ],
-  "accelerating": ["Credit Growth / Loan Book Growth"],
-  "emerging": ["Digital Lending / Fintech Competition"],
-  "fading": ["Provisioning / Credit Costs"],
-  "newly_risky": ["Net Interest Margin (NIM) / Spread Compression"],
-  "overall_shift": "mixed",
   "shift_summary": "Growth narrative remains intact but margin commentary turned cautious for the first time in several quarters, with deposit cost pressure now explicitly flagged as a near-term headwind."
 }}
 
-Status rules:
-- accelerating: >50% more mentions AND positive sentiment
-- emerging: present this quarter but minimal/absent last quarter
-- fading: >50% fewer mentions or dropped off
-- newly_risky: newly negative or newly prominent in risk context
-- resolved: was a concern, now explicitly addressed/removed
-- stable: no material change
+Do NOT return status, count_change, sentiment_change, or the
+accelerating/emerging/fading/newly_risky rollups — those are computed in code
+from the counts and sentiment you provide.
 """
+
+
+# Bump when the classification rules below change (part of SIGNAL_VERSION disc.).
+NARRATIVE_SCORING_VERSION = "1.0.0"
+
+
+def _classify_theme(cur_n: int, prev_n: int,
+                    cur_s: float, prev_s: float) -> tuple[ThemeStatus, str]:
+    """
+    Deterministic theme status from the counts and sentiment the LLM extracted.
+
+    Replaces the model's own `status` label so the classification is a
+    reproducible function of the evidence, not a judgement that can disagree
+    with the counts shown beside it. Rules mirror the ones previously stated in
+    the prompt. RESOLVED is not emitted — "a concern now explicitly removed"
+    cannot be told from counts alone, so a vanished theme reads as FADING.
+    """
+    ratio = (cur_n / prev_n) if prev_n > 0 else float("inf")
+    # newly negative this quarter -> newly_risky (checked first: a new negative
+    # theme is a risk, not merely "emerging").
+    if cur_s <= -0.2 and cur_s < prev_s:
+        return ThemeStatus.NEWLY_RISKY, "sentiment turned negative vs prior"
+    # present now, minimal/absent last quarter
+    if prev_n <= 1 and cur_n >= 2:
+        return ThemeStatus.EMERGING, "minimal/absent prior, present now"
+    # dropped off, or >50% fewer mentions
+    if cur_n == 0 or ratio <= 0.5:
+        return ThemeStatus.FADING, "dropped off or >50% fewer mentions"
+    # >50% more mentions AND positive sentiment
+    if ratio >= 1.5 and cur_s > 0:
+        return ThemeStatus.ACCELERATING, ">50% more mentions, positive sentiment"
+    return ThemeStatus.STABLE, "no material change"
 
 
 class NarrativeAgent(BaseAgent):
@@ -451,32 +472,26 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
                 return out
 
             themes = []
+            _manifest_items = []
             for t in data.get("themes", []):
-                # An unrecognised status is a parse failure, not a finding.
-                # Coercing it to STABLE asserted "this theme didn't move" —
-                # a verdict manufactured from a bad string.
-                status_str = (t.get("status") or "").strip().lower()
-                try:
-                    status = ThemeStatus(status_str)
-                except ValueError:
-                    logger.warning(
-                        f"[NarrativeAgent] Dropped theme {t.get('theme','?')!r}: "
-                        f"unrecognised status {status_str!r}"
-                    )
+                _theme = t.get("theme","") or ""
+                if not _theme:
                     continue
                 _cur_n  = safe_int(t.get("evidence_count_current"))
                 _prev_n = safe_int(t.get("evidence_count_previous"))
                 _cur_s  = safe_float(t.get("sentiment_current"))
                 _prev_s = safe_float(t.get("sentiment_previous"))
 
+                # Status computed in code from the counts/sentiment, not taken
+                # from the model — so it can never contradict the numbers shown
+                # beside it. count_change / sentiment_change stay code-computed.
+                status, _rule = _classify_theme(_cur_n, _prev_n, _cur_s, _prev_s)
+
                 themes.append(ThemeSignal(
-                    theme=t.get("theme","") or "",
+                    theme=_theme,
                     status=status,
                     evidence_count_current=_cur_n,
                     evidence_count_previous=_prev_n,
-                    # Subtraction of two numbers the model already gave us.
-                    # Asking it to also do the arithmetic invites a delta that
-                    # contradicts its own operands.
                     count_change=_cur_n - _prev_n,
                     sentiment_current=_cur_s,
                     sentiment_previous=_prev_s,
@@ -484,18 +499,38 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
                     interpretation=t.get("interpretation","") or "",
                     key_quotes=_verified_quotes(t.get("key_quotes")),
                 ))
+                _manifest_items.append({
+                    "theme": _theme, "status": status.value, "rule": _rule,
+                    "current": _cur_n, "previous": _prev_n,
+                    "count_change": _cur_n - _prev_n,
+                    "sentiment_current": _cur_s, "sentiment_previous": _prev_s,
+                })
+
+            # Rollups derived from the computed statuses, not from the model.
+            _accel = [t.theme for t in themes if t.status == ThemeStatus.ACCELERATING]
+            _emerg = [t.theme for t in themes if t.status == ThemeStatus.EMERGING]
+            _fade  = [t.theme for t in themes if t.status == ThemeStatus.FADING]
+            _risky = [t.theme for t in themes if t.status == ThemeStatus.NEWLY_RISKY]
+            _pos, _neg = len(_accel) + len(_emerg), len(_fade) + len(_risky)
+            _overall = ("positive" if _pos > _neg else
+                        "negative" if _neg > _pos else
+                        "mixed" if (_pos and _neg) else "neutral")
 
             return NarrativeSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
                 themes=themes,
-                accelerating=data.get("accelerating") or [],
-                emerging=data.get("emerging") or [],
-                fading=data.get("fading") or [],
-                newly_risky=data.get("newly_risky") or [],
-                overall_shift=data.get("overall_shift") or "neutral",
+                accelerating=_accel, emerging=_emerg,
+                fading=_fade, newly_risky=_risky,
+                overall_shift=_overall,
                 shift_summary=data.get("shift_summary") or "",
                 citations=citations,
+                manifest={
+                    "signal": "narrative",
+                    "scorer_version": NARRATIVE_SCORING_VERSION,
+                    "themes": _manifest_items,
+                    "overall_shift": _overall,
+                },
             )
         except Exception as e:
             # Re-raised, not swallowed into a placeholder signal. Returning a

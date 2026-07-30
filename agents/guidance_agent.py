@@ -1,36 +1,47 @@
 """
 agents/guidance_agent.py
-RAG → LLM → GuidanceSignal.
-Retrieves PAST guidance statements and ACTUAL results, then scores credibility.
+RAG → LLM (EXTRACTION ONLY) → deterministic score → GuidanceSignal.
+
+The LLM's job is now to extract guidance-vs-actuals OUTCOMES, not to judge a
+credibility number. The 0–100 score is computed in code by scoring.guidance
+from those outcomes, and the full ledger is attached as sig.manifest for audit.
+
+Unchanged: retrieval, citations, and the None-vs-0 "not assessed" distinction.
 """
 
 from __future__ import annotations
 
+from collections import Counter
+
 from loguru import logger
 from models import Citation, GuidanceItem, GuidanceSignal
-from agents.base import BaseAgent, safe_float, safe_int
+from agents.base import BaseAgent, safe_int
 from store.vector_store import VectorStore
 
+# Deterministic scorer + feature container (repo-root `scoring/` package).
+from scoring import GuidanceFeatures, score_guidance, EvidenceRef
 
-SYSTEM_PROMPT = """You are a quantitative equity analyst scoring guidance credibility.
+
+# The prompt no longer asks for a score, a rubric, beat_rate, serial_miss_risk,
+# or counts — all of those are derived in code from the items below.
+SYSTEM_PROMPT = """You are a quantitative equity analyst EXTRACTING guidance evidence.
+
+You do NOT output a credibility score. That number is computed downstream from
+the outcomes you return, so a score here would be ignored — spend your effort on
+getting each item's outcome right instead.
 
 You receive evidence from multiple quarters: prior-quarter GUIDANCE STATEMENTS
-and subsequent ACTUAL RESULTS. Your job is to compare what management said
-vs what actually happened — not to summarise.
-
-For each trackable guidance item, determine:
-- Was it met, beaten, or missed?
-- Was guidance withdrawn or substantially revised?
+and subsequent ACTUAL RESULTS. For each trackable guidance item, compare what
+management said against what actually happened and classify the outcome.
 
 Return ONLY valid JSON:
 {
-  "score": 72,
   "guidance_items": [
     {
       "metric": "Revenue",
       "period": "Q3 2024",
       "guided_in": "Q2 2024",
-      "guidance": "$20.0B–$21.0B",
+      "guidance": "$20.0B-$21.0B",
       "actual": "$20.5B",
       "outcome": "in_line",
       "miss_reason": ""
@@ -42,52 +53,47 @@ Return ONLY valid JSON:
       "guidance": "~28%",
       "actual": "25.1%",
       "outcome": "miss",
-      "miss_reason": "Higher-than-expected R&D spend and FX headwinds not anticipated in guidance"
+      "miss_reason": "Higher R&D spend and FX headwinds not anticipated in guidance"
     }
-  ],
-  "periods_tracked": 6,
-  "beats": 3,
-  "misses": 2,
-  "in_line": 1,
-  "withdrawals": 0,
-  "serial_miss_risk": false,
-  "summary": "Guidance credibility score of 72/100. Management met or exceeded revenue guidance in 5 of 6 periods but margin guidance has been consistently optimistic, missing in 4 of 6 periods. Serial miss risk on margin guidance is elevated."
+  ]
 }
 
-Scoring (0–100):
-- 85–100: >85% guidance met, reliable track record
-- 65–84:  60–85% accuracy, generally credible
-- 45–64:  Mixed, ~50% accuracy, some serial misses
-- 25–44:  Frequent misses, credibility concerns
-- 0–24:   Systematic over-promising
-
-Do NOT return serial_miss_risk, beat_rate or recent_pattern — they are counted
-from the guidance_items you return, not judged. Focus on getting each item's
-metric, period, guidance, actual and outcome right.
+outcome must be one of: beat | miss | in_line | withdrew | pending.
+Only beat / miss / in_line count toward the track record; withdrew and pending
+are recorded but do not score. Do NOT return counts, rates, or a score — those
+are computed in code from the items you return.
 """
 
 
 def _serial_miss_metrics(items: list) -> list[str]:
     """
-    Metrics this company has missed repeatedly.
-
-    ONE definition, used by both the agent flag and the YTD banner, which
-    previously disagreed: the prompt said "3+ consecutive periods" while
-    store.get_ytd_guidance() counted "2+ misses in total".
-
-    "Consecutive" is not honestly computable here — GuidanceItem.period is a
-    free-text label ("Q1 2026", "FY26 Q1", "next quarter"), so we cannot order
-    periods reliably enough to claim consecutiveness. Counting total misses per
-    metric is a claim the data actually supports; asserting consecutiveness from
-    unordered labels would be the same fabrication in a different costume.
+    Metrics this company has missed 2+ times (for the displayed serial_miss_risk
+    flag). One definition, shared with store.get_ytd_guidance(). Unchanged.
     """
-    from collections import Counter
     counts = Counter(
         (i.metric or "").strip().lower()
         for i in items
         if (i.outcome or "").lower() == "miss" and (i.metric or "").strip()
     )
     return sorted(m for m, c in counts.items() if c >= 2)
+
+
+def _guidance_summary(value: int, met: int, tracked: int,
+                      beat_rate: float, serial: bool) -> str:
+    """
+    Summary generated from the computed result — never from the LLM. The old
+    LLM summary stated a score ("credibility score of 72/100"); now that the
+    score is computed here, an LLM-written number could contradict it, so the
+    headline is stated in code where it cannot drift.
+    """
+    parts = [
+        f"Guidance credibility {value}/100.",
+        f"Management met or beat guidance in {met} of {tracked} tracked "
+        f"period(s) (beat rate {beat_rate:.2f}).",
+    ]
+    if serial:
+        parts.append("Serial-miss risk flagged: a metric missed 2+ times.")
+    return " ".join(parts)
 
 
 class GuidanceAgent(BaseAgent):
@@ -113,9 +119,7 @@ class GuidanceAgent(BaseAgent):
     ) -> GuidanceSignal:
         logger.info(f"[GuidanceAgent] Running for {ticker} {quarter} {fiscal_year}")
 
-        # Retrieve guidance statements across the compared periods. Pairs, not
-        # bare quarter labels — otherwise this pulls guidance from every year on
-        # record and scores the company's credibility against the wrong promises.
+        # Retrieval + citations: UNCHANGED. Pairs, not bare quarter labels.
         chunks = self.rag_retrieve(
             queries=self.GUIDANCE_QUERIES, ticker=ticker,
             periods=periods_to_compare,
@@ -123,9 +127,6 @@ class GuidanceAgent(BaseAgent):
             top_k_per_query=6,
         )
         citations = self.vs.as_citations(chunks[:8])
-
-        # Full periods in the prompt too — "Q1, Q4, Q1" tells the model nothing
-        # about which year's guidance it is auditing against which year's results.
         periods_label = ", ".join(f"{q} {y}" for q, y in periods_to_compare)
 
         user_prompt = f"""Company: {company} ({ticker})
@@ -135,8 +136,8 @@ Periods Being Compared: {periods_label}
 === EVIDENCE (guidance statements + actual results across quarters) ===
 {self.format_evidence(chunks[:14]) or "No guidance evidence retrieved."}
 
-Compare guidance given in PRIOR quarters vs ACTUAL results reported in SUBSEQUENT quarters.
-Score guidance credibility based on the full history available.
+Compare guidance given in PRIOR quarters vs ACTUAL results reported in
+SUBSEQUENT quarters. Classify each trackable item's outcome.
 """
 
         try:
@@ -145,84 +146,89 @@ Score guidance credibility based on the full history available.
             items = []
             for g in data.get("guidance_items", []):
                 items.append(GuidanceItem(
-                    metric=g.get("metric","") or "",
-                    period=g.get("period","") or "",
-                    guided_in=g.get("guided_in","") or "",
-                    guidance=g.get("guidance","") or "",
+                    metric=g.get("metric", "") or "",
+                    period=g.get("period", "") or "",
+                    guided_in=g.get("guided_in", "") or "",
+                    guidance=g.get("guidance", "") or "",
                     actual=g.get("actual"),
-                    outcome=g.get("outcome","") or "",
-                    miss_reason=g.get("miss_reason","") or "",
+                    outcome=(g.get("outcome", "") or "").strip().lower(),
+                    miss_reason=g.get("miss_reason", "") or "",
                 ))
 
-            _beats   = safe_int(data.get("beats"))
-            _misses  = safe_int(data.get("misses"))
-            _in_line = safe_int(data.get("in_line"))
+            # Counts derived from the items IN CODE (no longer trusting the
+            # model's separate count fields, which could disagree with its items).
+            oc = Counter(i.outcome for i in items)
+            _beats, _misses, _in_line = oc["beat"], oc["miss"], oc["in_line"]
+            _withdrawals = oc["withdrew"]
             _tracked = _beats + _misses + _in_line
 
-            # Nothing tracked means guidance credibility was NOT assessed — the
-            # company issued no trackable guidance this period (common for Indian
-            # names giving qualitative commentary, not US-style point/range
-            # guidance). This is a LEGITIMATE result, not a failure: return a
-            # valid signal with score=None so the quarter still counts as scored
-            # (the orchestrator only marks a period done when all four agents
-            # succeed — raising here left the quarter permanently "incomplete"
-            # and forced a full re-score of the other three agents every run).
-            #
-            # score=None (not 0) is deliberate: 0 is a verdict ("not credible"),
-            # absence is not. The dashboard renders None as "No guidance issued".
+            # Nothing tracked → guidance was NOT assessed. score=None (not 0),
+            # valid signal so the period still counts as scored. UNCHANGED.
             if _tracked == 0:
-                logger.info(f"[GuidanceAgent] {ticker} {quarter} {fiscal_year}: no trackable guidance — recording as not assessed.")
+                logger.info(
+                    f"[GuidanceAgent] {ticker} {quarter} {fiscal_year}: no trackable "
+                    f"guidance — recording as not assessed."
+                )
                 return GuidanceSignal(
                     ticker=ticker, company=company,
                     quarter=quarter, fiscal_year=fiscal_year,
                     score=None,
                     guidance_items=[],
                     periods_tracked=0,
-                    beats=0, misses=0, in_line=0, withdrawals=0,
+                    beats=0, misses=0, in_line=0, withdrawals=_withdrawals,
                     beat_rate=0.0,
                     serial_miss_risk=False,
                     recent_pattern=[],
-                    summary=(data.get("summary") or
-                             "No formal guidance issued this period — nothing to assess for credibility."),
+                    summary="No formal guidance issued this period — nothing to "
+                            "assess for credibility.",
                     citations=citations,
+                    manifest=None,
                 )
 
-            # Items exist but the model gave no usable score — that IS a failure
-            # (a glitch, not an honest absence), so keep raising to retry.
-            _score = safe_float(data.get("score"), None)
-            if _score is None:
-                raise ValueError("model returned no usable 'score'")
+            # ── Deterministic score over the extracted outcomes ──────────────
+            outcomes = [i.outcome for i in items
+                        if i.outcome in ("beat", "in_line", "miss")]
+            _ev = [EvidenceRef(chunk_id=c.chunk_id, quote=c.quote,
+                               speaker=getattr(c, "speaker", "") or "")
+                   for c in citations[:4]]
+            result = score_guidance(GuidanceFeatures(
+                outcomes=outcomes,
+                is_specific=True,                 # trackable guidance was issued
+                is_hedged=False,
+                withdrew_guidance=_withdrawals > 0,
+                outcome_evidence=_ev,
+                language_evidence=_ev,
+            ))
 
             _serial_metrics = _serial_miss_metrics(items)
+            _beat_rate = round(_beats / _tracked, 3)
+            _met = _beats + _in_line
             _recent_pattern = [i.outcome for i in items if i.outcome][:12]
+
+            manifest = {
+                **result.to_dict(),
+                "counts": {"beats": _beats, "misses": _misses,
+                           "in_line": _in_line, "withdrawals": _withdrawals},
+                "serial_miss_metrics": _serial_metrics,
+            }
 
             return GuidanceSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
-                score=_score,
+                score=result.value,               # computed, not judged
                 guidance_items=items,
-                periods_tracked=safe_int(data.get("periods_tracked")),
-                beats=_beats,
-                misses=_misses,
-                in_line=_in_line,
-                withdrawals=safe_int(data.get("withdrawals")),
-                # Division, not judgement — we hold both operands. Asking the
-                # model for it invites a rate that contradicts its own counts.
-                beat_rate=round(_beats / _tracked, 3),
-                # Counted from the items, not asked of the model. The prompt
-                # previously defined this as "same metric missed 3+ CONSECUTIVE
-                # periods" while store.get_ytd_guidance() used "missed 2+ times
-                # in total" — two different meanings for one concept, both shown
-                # on screen. One definition now, in code: see _serial_miss_metrics.
+                periods_tracked=_tracked,
+                beats=_beats, misses=_misses, in_line=_in_line,
+                withdrawals=_withdrawals,
+                beat_rate=_beat_rate,
                 serial_miss_risk=bool(_serial_metrics),
                 recent_pattern=_recent_pattern,
-                summary=data.get("summary") or "",
+                summary=_guidance_summary(result.value, _met, _tracked,
+                                          _beat_rate, bool(_serial_metrics)),
                 citations=citations,
+                manifest=manifest,
             )
+
         except Exception as e:
-            # Re-raised, not swallowed. score=50 published a fabricated
-            # "middling credibility" verdict on a company whose guidance was
-            # never actually assessed. The orchestrator catches this, records
-            # the error, and leaves the signal None.
             logger.error(f"[GuidanceAgent] Failed for {ticker} {quarter} {fiscal_year}: {e}")
             raise
