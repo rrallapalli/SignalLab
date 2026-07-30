@@ -17,8 +17,9 @@ import unicodedata
 
 from loguru import logger
 from models import (Citation, NarrativeSignal, ThemeSignal, ThemeStatus,
-                    normalize_quote_text)
+                    normalize_quote_text, format_period)
 from agents.base import BaseAgent, safe_float, safe_int
+from agents.prior_lookup import match_prior
 from store.vector_store import VectorStore
 
 
@@ -296,8 +297,10 @@ def _build_system_prompt(sector_key: str) -> str:
     return f"""You are an equity research analyst detecting narrative shifts in management commentary
 for an India-listed company in the **{sector_label}** sector.
 
-You will receive evidence chunks from the CURRENT quarter and the PRIOR quarter.
-Your task is to identify how management's narrative around key themes has CHANGED.
+You will receive evidence chunks from the CURRENT quarter only. For each theme,
+count how prominently it features THIS quarter and score its sentiment. The
+quarter-over-quarter shift is computed in code by comparing against the prior
+quarter's stored counts — you neither see nor estimate the prior quarter.
 
 Track these themes (sector-specific themes first, India-wide macro themes always apply),
 and any others you observe that are clearly material to this company:
@@ -305,7 +308,7 @@ and any others you observe that are clearly material to this company:
 {theme_block}
 
 For each theme:
-- Count evidence mentions in current vs prior quarter
+- Count evidence mentions in THIS quarter
 - Score sentiment (-1.0 to +1.0)
 - Write one-line interpretation
 (The theme's status and the accelerating/emerging/fading/newly_risky rollups are
@@ -324,9 +327,7 @@ Return ONLY valid JSON:
     {{
       "theme": "Net Interest Margin (NIM) / Spread Compression",
       "evidence_count_current": 12,
-      "evidence_count_previous": 4,
       "sentiment_current": -0.4,
-      "sentiment_previous": 0.1,
       "interpretation": "Management flagged NIM compression from deposit repricing for the first time this quarter, versus a confident tone last quarter.",
       "key_quotes": ["We expect some NIM pressure as deposit costs catch up", "Margins should stabilize in the back half of the year"]
     }}
@@ -384,6 +385,7 @@ class NarrativeAgent(BaseAgent):
         prior_quarter: str,
         prior_year: int,
         sector: str | None = None,
+        store=None,               # SignalStore, for the QoQ baseline lookup
     ) -> NarrativeSignal:
         sector_key = sector if sector in SECTOR_TAXONOMY else _infer_sector(company, ticker)
         sector_label = SECTOR_TAXONOMY.get(sector_key, {}).get("label", "General / Diversified")
@@ -391,13 +393,10 @@ class NarrativeAgent(BaseAgent):
 
         queries = _queries_for(sector_key)
 
+        # CURRENT quarter only — the QoQ baseline comes from the prior quarter's
+        # STORED counts (below), not from re-reading its chunks here.
         current_chunks = self.rag_retrieve(
             queries=queries, ticker=ticker, quarter=quarter, fiscal_year=fiscal_year,
-            doc_types=["earnings_call", "press_release", "investor_presentation"],
-            top_k_per_query=5,
-        )
-        prior_chunks = self.rag_retrieve(
-            queries=queries, ticker=ticker, quarter=prior_quarter, fiscal_year=prior_year,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             top_k_per_query=5,
         )
@@ -405,16 +404,13 @@ class NarrativeAgent(BaseAgent):
         citations = self.vs.as_citations(current_chunks[:8])
 
         user_prompt = f"""Company: {company} ({ticker})  |  Sector: {sector_label}
-Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter} {prior_year}
+Quarter: {quarter} {fiscal_year}
 
-=== CURRENT QUARTER EVIDENCE ===
-{self.format_evidence(current_chunks[:12]) or "No current evidence."}
+=== EVIDENCE (this quarter) ===
+{self.format_evidence(current_chunks[:12]) or "No evidence."}
 
-=== PRIOR QUARTER EVIDENCE ===
-{self.format_evidence(prior_chunks[:10]) or "No prior evidence."}
-
-Identify theme-level narrative shifts between these two quarters.
-Count evidence mentions, assess sentiment, and classify each theme's trajectory.
+For each theme, count how prominently it features THIS quarter and score its
+sentiment. Do not estimate any prior quarter.
 """
 
         try:
@@ -446,7 +442,7 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
             # source document. A quote that needs punctuation ignored in order
             # to match is not verbatim, so it is dropped here instead.
             _ordered_chunks = sorted(
-                (c for c, _ in (current_chunks + prior_chunks)),
+                (c for c, _ in current_chunks),
                 key=lambda c: (getattr(c, "doc_id", "") or "",
                                getattr(c, "char_start", 0) or 0),
             )
@@ -471,20 +467,42 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
                     )
                 return out
 
+            # ── QoQ baseline from the prior quarter's STORED counts ──────────
+            # No re-ingestion: read the prior period's stored narrative signal
+            # and match themes by name. If it was never scored, there is no
+            # baseline — flagged in the manifest, not silently treated as "all
+            # new" (which would paint every theme EMERGING).
+            _prior_themes: dict[str, dict] = {}
+            _prior_available = False
+            if store is not None:
+                _prow = store.get_signal_row("narrative", ticker, prior_quarter, prior_year)
+                if _prow and _prow.get("themes"):
+                    _prior_available = True
+                    for pt in _prow["themes"]:
+                        nm = pt.get("theme", "")
+                        if nm:
+                            _prior_themes[nm] = {
+                                "count": safe_int(pt.get("evidence_count_current")),
+                                "sentiment": safe_float(pt.get("sentiment_current")),
+                            }
+            _prior_names = list(_prior_themes.keys())
+
             themes = []
             _manifest_items = []
             for t in data.get("themes", []):
                 _theme = t.get("theme","") or ""
                 if not _theme:
                     continue
-                _cur_n  = safe_int(t.get("evidence_count_current"))
-                _prev_n = safe_int(t.get("evidence_count_previous"))
-                _cur_s  = safe_float(t.get("sentiment_current"))
-                _prev_s = safe_float(t.get("sentiment_previous"))
+                _cur_n = safe_int(t.get("evidence_count_current"))
+                _cur_s = safe_float(t.get("sentiment_current"))
 
-                # Status computed in code from the counts/sentiment, not taken
-                # from the model — so it can never contradict the numbers shown
-                # beside it. count_change / sentiment_change stay code-computed.
+                # Prior counts from the matched stored theme (0 if unmatched or
+                # no prior signal). Status is a code function of both.
+                _match  = match_prior(_theme, _prior_names) if _prior_names else None
+                _pinfo  = _prior_themes.get(_match, {}) if _match else {}
+                _prev_n = _pinfo.get("count", 0)
+                _prev_s = _pinfo.get("sentiment", 0.0)
+
                 status, _rule = _classify_theme(_cur_n, _prev_n, _cur_s, _prev_s)
 
                 themes.append(ThemeSignal(
@@ -504,6 +522,7 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
                     "current": _cur_n, "previous": _prev_n,
                     "count_change": _cur_n - _prev_n,
                     "sentiment_current": _cur_s, "sentiment_previous": _prev_s,
+                    "matched_prior": _match,
                 })
 
             # Rollups derived from the computed statuses, not from the model.
@@ -528,6 +547,8 @@ Count evidence mentions, assess sentiment, and classify each theme's trajectory.
                 manifest={
                     "signal": "narrative",
                     "scorer_version": NARRATIVE_SCORING_VERSION,
+                    "prior_period": format_period(prior_quarter, prior_year),
+                    "prior_available": _prior_available,
                     "themes": _manifest_items,
                     "overall_shift": _overall,
                 },

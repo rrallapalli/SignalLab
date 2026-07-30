@@ -1,13 +1,21 @@
 """
-scoring/confidence.py — Management Confidence (0-10).
+scoring/confidence.py — Management Confidence (0-10), LEVEL score.
 
-Confidence is inherently QoQ-relative, so the scorer takes current AND prior
-features. If no prior exists, QoQ terms are skipped and confidence is lowered
-rather than fabricated.
+Confidence is a property of THIS quarter's language — how confident, specific
+and unhedged management sounds — so it is scored from this quarter's features
+alone. It is deliberately NOT quarter-over-quarter:
 
-LLM extraction contract (CONFIDENCE_EXTRACTION_PROMPT below): the model reads
-MANAGEMENT statements only (exclude analyst turns) and emits atomic features,
-each with a verbatim quote + chunk_id. It does NOT emit a score.
+  * Only the anchor quarter of a run ever had its prior ingested, so a QoQ term
+    made the Latest column score on a different basis than the QoQ/YoY columns
+    beside it — the three were not comparable.
+  * A level score is reproducible: it depends only on the quarter's own evidence,
+    not on whether a neighbour happened to be fetched.
+
+QoQ movement is still shown — as the delta between stored level scores — but it
+is computed at the display layer, not baked into the number.
+
+LLM extraction contract: the model reads MANAGEMENT statements only and emits
+atomic features, each with a verbatim quote. It does NOT emit a score.
 """
 
 from __future__ import annotations
@@ -18,17 +26,18 @@ from typing import Optional
 from .base import (EvidenceRef, ScoreLedger, ScoreResult, confidence_label,
                    present)
 
-CONFIDENCE_SCORING_VERSION = "1.0.0"
+CONFIDENCE_SCORING_VERSION = "2.0.0"   # 2.x = level score (was QoQ-relative)
 
 # --- weights (named, defensible, tied to the published rubric) -------------- #
 BASELINE = 7.0                 # managements skew positive; 7 = steady/neutral
 W_TONE = 2.0                   # mean management polarity in [-1,1] -> +/-2.0
 W_HEDGE_DENSITY = -1.5         # hedging per 1k words, scaled
-W_DEFENSIVE_QOQ = -0.6         # each net new defensive term QoQ (capped)
-W_GUIDANCE_WIDENED = -0.8      # guidance band widened materially
+W_DEFENSIVE = -0.6             # each defensive term above a small floor (capped)
+W_WIDE_GUIDANCE = -0.8         # guidance range notably wide / uncertain
 W_SUPERLATIVE = 0.4            # strong positive assertions (capped)
-W_TOPIC_AVOIDANCE = -1.0       # declined to give a previously-given number
-CAP_DEFENSIVE = 1.8            # max magnitude from the defensive-QoQ term
+W_TOPIC_AVOIDANCE = -1.0       # declined to give a number it normally would
+DEFENSIVE_FLOOR = 3            # a few caveats are normal; penalise the excess
+CAP_DEFENSIVE = 1.8            # max magnitude from the defensive term
 CAP_SUPERLATIVE = 0.8
 
 
@@ -41,7 +50,7 @@ class ConfidenceFeatures:
     hedge_evidence: list[EvidenceRef] = field(default_factory=list)
     defensive_terms: int = 0                      # count this quarter
     defensive_evidence: list[EvidenceRef] = field(default_factory=list)
-    guidance_band_widened: bool = False
+    wide_guidance: bool = False                   # range notably wide THIS quarter
     guidance_evidence: list[EvidenceRef] = field(default_factory=list)
     superlative_terms: int = 0
     superlative_evidence: list[EvidenceRef] = field(default_factory=list)
@@ -59,36 +68,34 @@ def _hedge_penalty(per_1k: float) -> float:
 def score_confidence(curr: ConfidenceFeatures,
                      prev: Optional[ConfidenceFeatures] = None,
                      ensemble_spread: Optional[float] = None) -> ScoreResult:
+    """
+    Level score in [0, 10]. `prev` is accepted for call-signature compatibility
+    but IGNORED — confidence is no longer quarter-over-quarter.
+    """
     L = ScoreLedger(baseline=BASELINE, lo=0.0, hi=10.0)
 
-    # Tone (level term, always present)
+    # Tone
     L.add("tone", W_TONE * curr.mean_tone,
           detail=f"mean management polarity {curr.mean_tone:+.2f}",
           evidence=curr.tone_evidence)
 
-    # Hedging density (level term)
+    # Hedging density
     L.add("hedging", _hedge_penalty(curr.hedge_per_1k),
           detail=f"{curr.hedge_per_1k:.1f} hedges / 1k words",
           evidence=curr.hedge_evidence)
 
-    # Defensive language — QoQ delta if we have a prior, else level-vs-baseline
-    if prev is not None:
-        net = curr.defensive_terms - prev.defensive_terms
-        delta = max(-CAP_DEFENSIVE, min(CAP_DEFENSIVE, W_DEFENSIVE_QOQ * net))
-        L.add("defensive_language_qoq", delta,
-              detail=f"{curr.defensive_terms} vs {prev.defensive_terms} prior "
-                     f"(net {net:+d})",
-              evidence=curr.defensive_evidence)
-    else:
-        delta = max(-CAP_DEFENSIVE, W_DEFENSIVE_QOQ * max(0, curr.defensive_terms - 3))
-        L.add("defensive_language_level", delta,
-              detail=f"{curr.defensive_terms} defensive terms (no prior quarter)",
+    # Defensive language (level: excess above a small floor of normal caveats)
+    if curr.defensive_terms > DEFENSIVE_FLOOR:
+        delta = max(-CAP_DEFENSIVE,
+                    W_DEFENSIVE * (curr.defensive_terms - DEFENSIVE_FLOOR))
+        L.add("defensive_language", delta,
+              detail=f"{curr.defensive_terms} defensive terms",
               evidence=curr.defensive_evidence)
 
-    # Guidance band
-    if curr.guidance_band_widened:
-        L.add("guidance_band_widened", W_GUIDANCE_WIDENED,
-              detail="guidance range widened materially QoQ",
+    # Wide / uncertain guidance range
+    if curr.wide_guidance:
+        L.add("wide_guidance", W_WIDE_GUIDANCE,
+              detail="guidance range notably wide / uncertain",
               evidence=curr.guidance_evidence)
 
     # Superlatives (capped positive)
@@ -101,15 +108,13 @@ def score_confidence(curr: ConfidenceFeatures,
     # Topic avoidance
     if curr.topic_avoidance:
         L.add("topic_avoidance", W_TOPIC_AVOIDANCE,
-              detail="declined to give a previously-provided number",
+              detail="declined to give a number it normally would",
               evidence=curr.avoidance_evidence)
 
     n_ev = sum(len(i.evidence) for i in L.items)
     conflict = curr.mean_tone > 0.3 and curr.hedge_per_1k > 12  # bullish+hedgy
     conf, reason = confidence_label(n_evidence=n_ev, conflict=conflict,
                                     spread=ensemble_spread)
-    if prev is None and conf == "high":
-        conf, reason = "medium", "no prior quarter for QoQ comparison"
 
     return ScoreResult(
         signal="confidence",
@@ -118,7 +123,7 @@ def score_confidence(curr: ConfidenceFeatures,
         ledger=L,
         confidence=conf,
         confidence_reason=reason,
-        extras={"previous": present(BASELINE, 1) if prev is None else None},
+        extras={},
     )
 
 
@@ -128,12 +133,13 @@ ignore analyst questions. Return strict JSON with these fields. For every item,
 include the verbatim quote and its chunk_id. Invent nothing.
 
 {
-  "management_statements": [ {"chunk_id": "...", "quote": "...", "speaker": "CEO"} ],
+  "management_statements": [ {"chunk_id": "...", "quote": "...", "speaker": "CEO", "tone": "positive|neutral|negative"} ],
   "hedging_markers":       [ {"chunk_id": "...", "quote": "...phrase..."} ],
   "defensive_terms":       [ {"chunk_id": "...", "quote": "...", "term": "headwind"} ],
   "superlative_terms":     [ {"chunk_id": "...", "quote": "...", "term": "record"} ],
-  "guidance_statements":   [ {"chunk_id": "...", "quote": "...", "low": null, "high": null} ],
-  "topic_avoidance":       [ {"chunk_id": "...", "quote": "...", "what": "declined FY margin"} ]
+  "wide_guidance":         false,
+  "topic_avoidance":       false
 }
-Counts, densities and QoQ deltas are computed in code, not by you.
+Counts and densities are computed in code, not by you. Everything describes THIS
+quarter only — no comparison to a prior quarter.
 """

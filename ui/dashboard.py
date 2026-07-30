@@ -873,9 +873,29 @@ if not conf_history:
     st.warning(f"No signals stored for **{active_ticker}**. Run the pipeline from the sidebar.")
     st.stop()
 
-# Use pipeline_result if from current session, otherwise reconstruct from DB
+# Available stored periods for this ticker (most recent first, deduped).
+_avail_periods = []
+for _r in conf_history:
+    _p = format_period(_r.get('quarter',''), _r.get('fiscal_year',''))
+    if _p and _p not in _avail_periods:
+        _avail_periods.append(_p)
+
+# Period picker: choose which stored quarter anchors the Latest column; QoQ and
+# YoY are derived from it. Defaults to the freshly-run period if this session
+# just ran one, otherwise the most recent stored quarter.
 result = st.session_state.get("pipeline_result")
-if result and result.get("latest"):
+_fresh_label = result.get("latest_label") if (result and result.get("latest")) else None
+_default_idx = _avail_periods.index(_fresh_label) if _fresh_label in _avail_periods else 0
+view_period = st.selectbox(
+    "📅 View period  ·  anchors the Latest column (QoQ / YoY derive from it)",
+    _avail_periods or ["—"],
+    index=_default_idx if _avail_periods else 0,
+    key=f"view_period::{active_ticker}",
+)
+
+# Use the freshly-run bundles only while the user is still viewing that exact
+# period; otherwise reconstruct the chosen period from the database.
+if result and result.get("latest") and view_period == _fresh_label:
     latest_b = result["latest"]
     qoq_b    = result["qoq"]
     yoy_b    = result["yoy"]
@@ -883,14 +903,7 @@ if result and result.get("latest"):
     label_q  = result["qoq_label"]
     label_y  = result["yoy_label"]
 else:
-    # Reconstruct from DB: latest = first row, qoq = second, yoy = matching quarter -1yr
-    def _find_row(history, quarter_label):
-        for r in history:
-            if format_period(r.get('quarter',''), r.get('fiscal_year','')) == quarter_label:
-                return r
-        return history[0] if history else {}
-
-    label_l = format_period(conf_history[0].get('quarter',''), conf_history[0].get('fiscal_year','')) if conf_history else "—"
+    label_l = view_period
     l_q, _l_yr_int = parse_period(label_l); l_yr = str(_l_yr_int) if _l_yr_int else "2024"
     from agents.orchestrator import resolve_quarters
     (lq,ly),(qq,qy),(yq,yy) = resolve_quarters(l_q, int(l_yr))
@@ -1240,6 +1253,11 @@ with tab2:
             if not nd:
                 st.caption("No data")
                 continue
+            _pq, _pyr = parse_period(period_label)
+            _man = ss.get_manifest("narrative", active_ticker, _pq, _pyr) if _pyr else None
+            if _man and _man.get("prior_available") is False:
+                st.caption(f"⚠ No prior baseline vs {_man.get('prior_period','—')} — "
+                           f"themes shown against an empty prior.")
             for label, key, pill_cls in sections:
                 items = nd.get(key,[]) or []
                 if items:
@@ -1530,6 +1548,11 @@ with tab4:
     for col, rd, lbl in [(r1,lr,label_l),(r2,qr,label_q),(r3,yr_,label_y)]:
         with col:
             st.markdown(f"**{lbl}**")
+            _rpq, _rpyr = parse_period(lbl)
+            _rman = ss.get_manifest("risk", active_ticker, _rpq, _rpyr) if _rpyr else None
+            if _rman and _rman.get("prior_available") is False:
+                st.caption(f"⚠ No prior baseline vs {_rman.get('prior_period','—')} — "
+                           f"risks shown against an empty prior.")
             risks = rd.get("risks",[]) or []
             if not risks:
                 st.caption("No data")
@@ -1657,21 +1680,42 @@ with tab6:
 
         st.divider()
 
-        # Filter by quarter
+        # Filters: quarter + document type
         all_quarters_in_docs = sorted(
             set(format_period(d.get('quarter',''), d.get('fiscal_year','')) for d in source_docs),
             reverse=True,
         )
-        selected_source_q = st.selectbox(
-            "Filter by quarter", ["All quarters"] + all_quarters_in_docs,
-            key="sources_quarter_filter",
+        all_types_in_docs = sorted(
+            set(d.get("doc_type","") for d in source_docs if d.get("doc_type"))
         )
 
-        # Display documents
-        filtered = source_docs if selected_source_q == "All quarters" else [
+        fcol1, fcol2 = st.columns(2)
+        with fcol1:
+            selected_source_q = st.selectbox(
+                "Filter by quarter", ["All quarters"] + all_quarters_in_docs,
+                key="sources_quarter_filter",
+            )
+        with fcol2:
+            selected_types = st.multiselect(
+                "Filter by document type",
+                all_types_in_docs,
+                default=all_types_in_docs,
+                format_func=lambda t: f"{_DOC_ICONS.get(t,'📄')} {t.replace('_',' ').title()}",
+                key="sources_type_filter",
+            )
+        # Empty selection means "no type filter" (show all) rather than an empty
+        # list — clearing the box shouldn't blank the whole tab.
+        _type_set = set(selected_types) if selected_types else set(all_types_in_docs)
+
+        # Display documents (both filters applied)
+        filtered = [
             d for d in source_docs
-            if format_period(d.get('quarter',''), d.get('fiscal_year','')) == selected_source_q
+            if (selected_source_q == "All quarters"
+                or format_period(d.get('quarter',''), d.get('fiscal_year','')) == selected_source_q)
+            and d.get("doc_type","") in _type_set
         ]
+
+        st.caption(f"Showing {len(filtered)} of {len(source_docs)} documents.")
 
         for doc in filtered:
             dtype     = doc.get("doc_type", "")

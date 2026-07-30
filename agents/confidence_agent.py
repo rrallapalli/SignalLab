@@ -2,14 +2,12 @@
 agents/confidence_agent.py
 RAG → LLM (EXTRACTION ONLY) → deterministic ManagementConfidenceScore (0–10).
 
-The LLM no longer judges a confidence score. It extracts atomic, quoted features
-for the CURRENT and PRIOR quarter (both are already retrieved and placed in the
-prompt); scoring.confidence.score_confidence computes the 0–10 headline from those
-features, QoQ-aware. The six sub-dimensions are DERIVED from the same features so
-they are a consistent decomposition of one evidence set, not independent guesses.
-The full ledger is attached as sig.manifest for audit.
-
-Retrieval and citations are unchanged from the prior version.
+LEVEL score: the LLM extracts atomic, quoted features for THIS quarter only
+(no prior-quarter retrieval), scoring.confidence.score_confidence computes the
+0–10 from them, and the six sub-dimensions are DERIVED from the same features.
+QoQ movement is shown at the display layer as the delta between stored scores,
+not baked into the number — so all three columns are scored on one basis and
+the score is reproducible from the quarter's own evidence.
 """
 
 from __future__ import annotations
@@ -56,15 +54,13 @@ def _sub_dimensions(f: ConfidenceFeatures) -> dict:
     """
     First-pass decomposition of the SAME features that drive the headline score,
     on the existing 0–10 dashboard dimensions (uncertainty_level and
-    defensiveness are inverted: 10 = low uncertainty / not defensive). These
-    weights are heuristic and meant to be tuned; the headline score is the
-    principled number. Kept consistent so a dimension can never move opposite to
-    the evidence that moved the score.
+    defensiveness are inverted: 10 = low uncertainty / not defensive). Heuristic
+    weights, meant to be tuned; the headline score is the principled number.
     """
     hedge_pen = _clamp((f.hedge_per_1k - 5) / 10.0, 0.0, 1.0)      # 0..1
     def_pen = _clamp(f.defensive_terms / 8.0, 0.0, 1.0)           # 0..1
     sup = min(2.0, f.superlative_terms * 0.7)
-    band = 2.0 if f.guidance_band_widened else 0.0
+    band = 2.0 if f.wide_guidance else 0.0
     return {
         "confidence_level":  round(_clamp(5 + 3 * f.mean_tone - 4 * hedge_pen), 1),
         "uncertainty_level": round(_clamp(10 - 7 * hedge_pen), 1),
@@ -79,33 +75,25 @@ SYSTEM_PROMPT = """You EXTRACT evidence about management confidence — you do N
 output a score. The 0–10 confidence score is computed downstream from the
 features you return, so any score you write here would be ignored.
 
-Read MANAGEMENT statements only (CEO / CFO / IR); ignore analyst questions. For
-the CURRENT quarter and, SEPARATELY, the PRIOR quarter, extract atomic
+Read MANAGEMENT statements only (CEO / CFO / IR); ignore analyst questions.
+Describe THIS quarter only — do NOT compare to a prior quarter. Extract atomic
 observations, each with a verbatim quote. Invent nothing; empty categories -> [].
 
 Return ONLY valid JSON:
 {
-  "current": {
-    "management_statements": [{"quote": "...", "tone": "positive|neutral|negative"}],
-    "hedging_markers":       [{"quote": "...we are monitoring closely..."}],
-    "defensive_terms":       [{"quote": "...", "term": "headwind"}],
-    "superlative_terms":     [{"quote": "...", "term": "record"}],
-    "guidance_band_widened": false,
-    "topic_avoidance":       false
-  },
-  "prior": {
-    "management_statements": [{"quote": "...", "tone": "positive|neutral|negative"}],
-    "hedging_markers":       [{"quote": "..."}],
-    "defensive_terms":       [{"quote": "...", "term": "..."}]
-  }
+  "management_statements": [{"quote": "...", "tone": "positive|neutral|negative"}],
+  "hedging_markers":       [{"quote": "...we are monitoring closely..."}],
+  "defensive_terms":       [{"quote": "...", "term": "headwind"}],
+  "superlative_terms":     [{"quote": "...", "term": "record"}],
+  "wide_guidance":         false,
+  "topic_avoidance":       false
 }
 
 tone: your read of each management statement's stance.
-guidance_band_widened: true ONLY if the guidance RANGE is materially wider than
-  the prior quarter's (a higher-uncertainty signal).
-topic_avoidance: true if management declined to give a number they had
-  previously provided.
-Counts, densities and QoQ deltas are computed in code — do not compute them.
+wide_guidance: true if the guidance range given this quarter is notably wide or
+  uncertain (a lower-confidence signal on its own, no comparison needed).
+topic_avoidance: true if management declined to give a number it normally would.
+Counts and densities are computed in code — do not compute them.
 """
 
 
@@ -129,78 +117,50 @@ class ConfidenceAgent(BaseAgent):
         company: str,
         quarter: str,
         fiscal_year: int,
-        prior_quarter: str,
-        prior_year: int,
+        prior_quarter: str = "",   # accepted for orchestrator call-compat; unused
+        prior_year: int | str = "",
     ) -> ConfidenceSignal:
         logger.info(f"[ConfidenceAgent] Running for {ticker} {quarter} {fiscal_year}")
 
-        # Retrieval: UNCHANGED — current AND prior quarter, management only.
+        # Current quarter only — a level score needs no prior retrieval.
         current_chunks = self.rag_retrieve(
             queries=self.EVIDENCE_QUERIES, ticker=ticker,
             quarter=quarter, fiscal_year=fiscal_year,
             doc_types=["earnings_call", "press_release", "investor_presentation"],
             management_only=True, top_k_per_query=6,
         )
-        prior_chunks = self.rag_retrieve(
-            queries=self.EVIDENCE_QUERIES, ticker=ticker,
-            quarter=prior_quarter, fiscal_year=prior_year,
-            doc_types=["earnings_call", "press_release", "investor_presentation"],
-            management_only=True, top_k_per_query=5,
-        )
-
         current_evidence = self.format_evidence(current_chunks[:10])
-        prior_evidence = self.format_evidence(prior_chunks[:8])
         citations = self.vs.as_citations(current_chunks[:8])
-
-        # Management word counts drive hedging density (per 1k words).
         cur_words = sum(len((c.text or "").split()) for c, _ in current_chunks) or 1
-        prior_words = sum(len((c.text or "").split()) for c, _ in prior_chunks) or 1
 
         user_prompt = f"""Company: {company} ({ticker})
-Current Quarter: {quarter} {fiscal_year}
-Prior Quarter: {prior_quarter} {prior_year}
+Quarter: {quarter} {fiscal_year}
 
-=== CURRENT QUARTER EVIDENCE (management only) ===
-{current_evidence or "No current quarter evidence retrieved."}
+=== EVIDENCE (management only) ===
+{current_evidence or "No evidence retrieved."}
 
-=== PRIOR QUARTER EVIDENCE (management only) ===
-{prior_evidence or "No prior quarter evidence retrieved."}
-
-Extract the confidence features for the CURRENT quarter and, separately, the
-PRIOR quarter, per the schema. Quote verbatim.
+Extract the confidence features for THIS quarter, per the schema. Quote verbatim.
 """
 
         try:
             data = await self.llm_reason(SYSTEM_PROMPT, user_prompt)
-            cur = data.get("current", {}) or {}
-            pri = data.get("prior", {}) or {}
 
             curr_feats = ConfidenceFeatures(
-                mean_tone=_tone_mean(cur.get("management_statements")),
-                tone_evidence=_refs(cur.get("management_statements")),
-                hedge_per_1k=len(cur.get("hedging_markers") or []) / cur_words * 1000.0,
-                hedge_evidence=_refs(cur.get("hedging_markers")),
-                defensive_terms=len(cur.get("defensive_terms") or []),
-                defensive_evidence=_refs(cur.get("defensive_terms")),
-                guidance_band_widened=bool(cur.get("guidance_band_widened")),
-                superlative_terms=len(cur.get("superlative_terms") or []),
-                superlative_evidence=_refs(cur.get("superlative_terms")),
-                topic_avoidance=bool(cur.get("topic_avoidance")),
+                mean_tone=_tone_mean(data.get("management_statements")),
+                tone_evidence=_refs(data.get("management_statements")),
+                hedge_per_1k=len(data.get("hedging_markers") or []) / cur_words * 1000.0,
+                hedge_evidence=_refs(data.get("hedging_markers")),
+                defensive_terms=len(data.get("defensive_terms") or []),
+                defensive_evidence=_refs(data.get("defensive_terms")),
+                wide_guidance=bool(data.get("wide_guidance")),
+                superlative_terms=len(data.get("superlative_terms") or []),
+                superlative_evidence=_refs(data.get("superlative_terms")),
+                topic_avoidance=bool(data.get("topic_avoidance")),
                 avoidance_evidence=[],
                 total_words=cur_words,
             )
 
-            # Prior features only need the fields score_confidence reads for QoQ.
-            _has_prior = any(pri.get(k) for k in
-                             ("management_statements", "hedging_markers", "defensive_terms"))
-            prev_feats = ConfidenceFeatures(
-                mean_tone=_tone_mean(pri.get("management_statements")),
-                hedge_per_1k=len(pri.get("hedging_markers") or []) / prior_words * 1000.0,
-                defensive_terms=len(pri.get("defensive_terms") or []),
-                total_words=prior_words,
-            ) if _has_prior else None
-
-            result = score_confidence(curr_feats, prev_feats)
+            result = score_confidence(curr_feats)
 
             subdims = _sub_dimensions(curr_feats)
             tone = _tone_label(curr_feats)
@@ -208,9 +168,7 @@ PRIOR quarter, per the schema. Quote verbatim.
                        for i in result.ledger.items if abs(i.delta) > 1e-9][:4]
             # "reliability" = how much to trust THIS reading (evidence
             # sufficiency), deliberately NOT called "confidence": that word is
-            # the signal itself (management confidence), and "6.9 (high
-            # confidence)" beside "8.7 (medium confidence)" reads as a
-            # contradiction — a lower score looking more certain than a higher.
+            # the signal itself.
             summary = (f"Management confidence {result.value}/10. "
                        f"Read reliability: {result.confidence} "
                        f"({result.confidence_reason})."
@@ -224,9 +182,7 @@ PRIOR quarter, per the schema. Quote verbatim.
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
                 score=result.value,              # computed, not judged
-                # previous_score / change stay None: the dashboard computes the
-                # real delta from stored scores. The model is never asked.
-                previous_score=None,
+                previous_score=None,             # dashboard computes the delta
                 change=None,
                 confidence_level=subdims["confidence_level"],
                 uncertainty_level=subdims["uncertainty_level"],

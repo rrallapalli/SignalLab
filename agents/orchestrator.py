@@ -95,7 +95,17 @@ def _noop_progress(event: str, detail: dict) -> None:
 #                 in code from the counts the LLM extracts (severity stays an LLM
 #                 content assessment). Every stored signal predates this and must
 #                 re-score.
-SIGNAL_VERSION = "2026-07-30.2"
+#   2026-07-30.3  confidence is now a LEVEL score (scoring.confidence 2.x): no
+#                 within-score QoQ, no prior-quarter retrieval. All three columns
+#                 are scored on one basis and the "no prior quarter" caveat is
+#                 gone; QoQ movement is the display-layer delta only. Every stored
+#                 confidence signal predates this and must re-score.
+#   2026-07-30.4  narrative & risk get their QoQ baseline from the prior quarter's
+#                 STORED counts (matched by name), not from re-reading its chunks.
+#                 Each quarter extracts its own counts once; comparison is against
+#                 stored data. Removes the prior-chunk retrieval; adds
+#                 prior_available to the manifest. Re-score to populate baselines.
+SIGNAL_VERSION = "2026-07-30.4"
 
 
 def _retrieval_profile() -> str:
@@ -384,9 +394,9 @@ async def _run_signals_for_quarter(
     }
     agent_defs = [
         ("confidence", lambda: agents["confidence"].run(ticker, company, quarter, year, prior_q, prior_yr)),
-        ("narrative",  lambda: agents["narrative"].run(ticker, company, quarter, year, prior_q, prior_yr)),
+        ("narrative",  lambda: agents["narrative"].run(ticker, company, quarter, year, prior_q, prior_yr, store=ss)),
         ("guidance",   lambda: agents["guidance"].run(ticker, company, quarter, year, all_periods)),
-        ("risk",       lambda: agents["risk"].run(ticker, company, quarter, year, prior_q, prior_yr)),
+        ("risk",       lambda: agents["risk"].run(ticker, company, quarter, year, prior_q, prior_yr, store=ss)),
     ]
 
     for agent_name, agent_fn in agent_defs:

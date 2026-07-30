@@ -6,8 +6,9 @@ RAG → LLM → RiskSignal: detects newly material or escalating risks.
 from __future__ import annotations
 
 from loguru import logger
-from models import Citation, RiskItem, RiskSeverity, RiskSignal, RiskStatus
+from models import Citation, RiskItem, RiskSeverity, RiskSignal, RiskStatus, format_period
 from agents.base import BaseAgent, safe_int
+from agents.prior_lookup import match_prior
 from store.vector_store import VectorStore
 
 
@@ -89,16 +90,14 @@ class RiskAgent(BaseAgent):
         quarter: str, fiscal_year: int,
         prior_quarter: str,
         prior_year: int,
+        store=None,               # SignalStore, for the QoQ baseline lookup
     ) -> RiskSignal:
         logger.info(f"[RiskAgent] Running for {ticker} {quarter} {fiscal_year}")
 
+        # CURRENT quarter only — prior mention counts come from the prior
+        # quarter's STORED risk signal (below), not from re-reading its chunks.
         current_chunks = self.rag_retrieve(
             queries=self.RISK_QUERIES, ticker=ticker, quarter=quarter, fiscal_year=fiscal_year,
-            sections=["risk_factors","prepared_remarks","qa_session"],
-            top_k_per_query=5,
-        )
-        prior_chunks = self.rag_retrieve(
-            queries=self.RISK_QUERIES, ticker=ticker, quarter=prior_quarter, fiscal_year=prior_year,
             sections=["risk_factors","prepared_remarks","qa_session"],
             top_k_per_query=5,
         )
@@ -106,20 +105,33 @@ class RiskAgent(BaseAgent):
         citations = self.vs.as_citations(current_chunks[:8])
 
         user_prompt = f"""Company: {company} ({ticker})
-Current Quarter: {quarter} {fiscal_year}  |  Prior Quarter: {prior_quarter} {prior_year}
+Quarter: {quarter} {fiscal_year}
 
-=== CURRENT QUARTER RISK EVIDENCE ===
-{self.format_evidence(current_chunks[:12]) or "No current risk evidence."}
+=== RISK EVIDENCE (this quarter) ===
+{self.format_evidence(current_chunks[:12]) or "No risk evidence."}
 
-=== PRIOR QUARTER RISK EVIDENCE ===
-{self.format_evidence(prior_chunks[:10]) or "No prior risk evidence."}
-
-Identify risks that are NEW, ESCALATING, or DIMINISHING between these two quarters.
-Count mentions and assess severity. Focus on material changes.
+Identify material risks this quarter. For each, count verbatim mentions THIS
+quarter and assess severity. Do not estimate any prior quarter.
 """
 
         try:
             data = await self.llm_reason(SYSTEM_PROMPT, user_prompt)
+
+            # ── QoQ baseline from the prior quarter's STORED mention counts ──
+            # No re-ingestion: read the prior period's stored risk signal and
+            # match risks by name. Absent (never scored) -> no baseline, flagged
+            # in the manifest rather than marking every risk NEWLY_MATERIAL.
+            _prior_counts: dict[str, int] = {}
+            _prior_available = False
+            if store is not None:
+                _prow = store.get_signal_row("risk", ticker, prior_quarter, prior_year)
+                if _prow and _prow.get("risks"):
+                    _prior_available = True
+                    for pr in _prow["risks"]:
+                        nm = pr.get("risk", "")
+                        if nm:
+                            _prior_counts[nm] = safe_int(pr.get("mention_count_current"))
+            _prior_names = list(_prior_counts.keys())
 
             risks = []
             _manifest_items = []
@@ -127,8 +139,10 @@ Count mentions and assess severity. Focus on material changes.
                 _name = r.get("risk","") or ""
                 if not _name:
                     continue
-                _cur  = safe_int(r.get("mention_count_current"))
-                _prev = safe_int(r.get("mention_count_previous"))
+                _cur = safe_int(r.get("mention_count_current"))
+                # Prior mentions from the matched stored risk (0 if unmatched).
+                _match = match_prior(_name, _prior_names) if _prior_names else None
+                _prev = _prior_counts.get(_match, 0) if _match else 0
                 # Status computed in code from the mention deltas.
                 status, _rule = _classify_risk_status(_cur, _prev)
                 # Severity kept as the model's content assessment.
@@ -147,6 +161,7 @@ Count mentions and assess severity. Focus on material changes.
                     "risk": _name, "status": status.value, "rule": _rule,
                     "severity": severity.value,
                     "current": _cur, "previous": _prev, "count_change": _cur - _prev,
+                    "matched_prior": _match,
                 })
 
             # Rollups derived from the computed statuses, not from the model.
@@ -169,6 +184,8 @@ Count mentions and assess severity. Focus on material changes.
                 manifest={
                     "signal": "risk",
                     "scorer_version": RISK_SCORING_VERSION,
+                    "prior_period": format_period(prior_quarter, prior_year),
+                    "prior_available": _prior_available,
                     "risks": _manifest_items,
                     "overall_risk_direction": _direction,
                 },

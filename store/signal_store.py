@@ -527,6 +527,43 @@ class SignalStore:
                     d[c] = None
         return d
 
+    _SIGNAL_TABLE_BY_KIND = {
+        "confidence": "confidence_signals",
+        "narrative":  "narrative_signals",
+        "guidance":   "guidance_signals",
+        "risk":       "risk_signals",
+    }
+
+    def get_manifest(self, signal_type: str, ticker: str,
+                     quarter: str, fiscal_year: int) -> dict | None:
+        """Decoded scoring manifest for one signal of one period, or None."""
+        rows = self._conn.execute(
+            "SELECT manifest FROM signal_manifests WHERE id = ?",
+            [f"{signal_type}::{ticker}::{quarter}::{fiscal_year}"],
+        ).fetchall()
+        if not rows or rows[0][0] is None:
+            return None
+        raw = rows[0][0]
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        return raw
+
+    def get_signal_row(self, signal_type: str, ticker: str,
+                       quarter: str, fiscal_year: int) -> dict | None:
+        """
+        Raw stored row (JSON columns decoded) for ONE signal of one period, or
+        None if absent. Used by the narrative/risk agents to read a prior
+        quarter's counts as the QoQ baseline — a deterministic comparison
+        against stored data, with no re-ingestion of the prior quarter.
+        """
+        table = self._SIGNAL_TABLE_BY_KIND.get(signal_type)
+        if not table:
+            return None
+        return self._row_for_period(table, ticker, quarter, fiscal_year)
+
     def get_period_signals(self, ticker: str, quarter: str, fiscal_year: int) -> dict:
         """
         Rehydrate the four stored signals for one period as model objects.
