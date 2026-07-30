@@ -654,6 +654,11 @@ class SignalStore:
         # as "beat none of them", which the dashboard then paints red — a
         # damning verdict on a company whose guidance was simply never found.
         ytd_rate = (total_beats / total_tracked) if total_tracked > 0 else None
+        # HIT rate (met or beat) is what guidance CREDIBILITY is scored on:
+        # hitting in-line guidance is delivering on the promise. beat_rate
+        # (beats only) measures overshoot and reads misleadingly low for a
+        # reliable company (0 misses can still show a red beat_rate).
+        ytd_hit = ((total_beats + total_in_line) / total_tracked) if total_tracked > 0 else None
 
         from collections import Counter
         miss_counts = Counter(
@@ -666,6 +671,7 @@ class SignalStore:
             "year": year, "quarters_covered": quarters_covered,
             "total_beats": total_beats, "total_misses": total_misses,
             "total_in_line": total_in_line, "total_tracked": total_tracked,
+            "ytd_hit_rate":  (round(ytd_hit,  3) if ytd_hit  is not None else None),
             "ytd_beat_rate": (round(ytd_rate, 3) if ytd_rate is not None else None),
             "serial_misses": serial_misses,
         }

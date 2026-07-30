@@ -1305,11 +1305,13 @@ with tab3:
         _beats    = _ytd_guid["total_beats"]
         _misses   = _ytd_guid["total_misses"]
         _in_line  = _ytd_guid["total_in_line"]
-        _rate     = _ytd_guid["ytd_beat_rate"]
+        _rate     = _ytd_guid.get("ytd_hit_rate")
         _qtrs     = ", ".join(_ytd_guid["quarters_covered"])
         _serial   = _ytd_guid["serial_misses"]
         # _rate is None when no guidance items were tracked at all. Showing a
         # red 0% there says "missed everything" when it means "measured nothing".
+        # This is the HIT rate (met or beat) — what credibility is scored on —
+        # not a beats-only rate, so a company with 0 misses no longer reads red.
         if _rate is None:
             _rate_color, _rate_text = "#64748b", "—"
         else:
@@ -1328,6 +1330,7 @@ with tab3:
             "<div style='color:#64748b;font-size:0.75rem;text-transform:uppercase;",
             f"letter-spacing:0.08em;margin-bottom:0.2rem'>📅 YTD Guidance — {_ytd_yr} ({_qtrs})</div>",
             f"<div style='font-size:1.6rem;font-weight:800;color:{_rate_color}'>{_rate_text}</div>",
+            "<div style='color:#64748b;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em'>hit rate (met or beat)</div>",
             "</div>",
             "<div style='color:#94a3b8;font-size:0.88rem;line-height:1.8'>",
             f"<span style='color:#22c55e;font-weight:700'>✓ {_beats} beat</span> &nbsp;·&nbsp; ",
@@ -1394,14 +1397,19 @@ with tab3:
     for col, gd, lbl in [(m1,lg,label_l),(m2,qg,label_q),(m3,yg,label_y)]:
         with col:
             st.markdown(f"**{lbl}**")
-            br = float(gd.get("beat_rate") or 0)
             beats  = gd.get("beats",  0) or 0
             misses = gd.get("misses", 0) or 0
+            in_line= gd.get("in_line", 0) or 0
+            tracked = beats + misses + in_line
             serial = gd.get("serial_miss_risk", False)
             pattern= gd.get("recent_pattern", []) or []
-            st.metric("Beat Rate", f"{br:.0%}")
-            st.metric("Beats",  beats)
-            st.metric("Misses", misses)
+            # Hit rate (met or beat) — what the credibility score is based on.
+            # "—" when nothing tracked, so it never reads as "missed all".
+            hit_txt = f"{(beats + in_line)/tracked:.0%}" if tracked else "—"
+            st.metric("Hit Rate", hit_txt)
+            st.metric("Beats",   beats)
+            st.metric("In-line", in_line)
+            st.metric("Misses",  misses)
             if serial: st.error("⚠️ Serial miss risk")
             if pattern:
                 cells = [
