@@ -1,0 +1,14 @@
+# SignalLab run cost log — INFY — 2026-07-31T09:49:41.973454+00:00
+# call                   model                  in      out  reason   cost_usd
+  ConfidenceAgent        gpt-5.6-luna         3571      868     263    0.00878
+  ConfidenceAgent        gpt-5.6-luna         2808      774     442    0.00745
+  NarrativeAgent         gpt-5.6-luna         2381     1792     383    0.01313
+  NarrativeAgent         gpt-5.6-luna         2107     1943     307    0.01376
+  GuidanceAgent          gpt-5.6-luna         2038      840     438    0.00708
+  GuidanceAgent          gpt-5.6-luna         2038      917     512    0.00754
+  RiskAgent              gpt-5.6-luna         2130     1158     412    0.00908
+  ConfidenceAgent        gpt-5.6-luna          429      197       0    0.00161
+  RiskAgent              gpt-5.6-luna         2136     1143     333    0.00899
+  ConfidenceAgent        gpt-5.6-luna          370      150       0    0.00127
+# ------------------------------------------------------------------------
+# TOTAL  calls=10  in=20008  out=9782  reasoning=3090  cost_usd=0.07870  elapsed=173.6s

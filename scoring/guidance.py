@@ -19,7 +19,7 @@ from typing import Optional
 
 from .base import EvidenceRef, ScoreLedger, ScoreResult, confidence_label, present
 
-GUIDANCE_SCORING_VERSION = "1.0.0"
+GUIDANCE_SCORING_VERSION = "2.0.0"   # 2.x: beat-weighted + sample-shrunk (was flat hit-rate)
 
 OUTCOMES = {"beat", "in_line", "miss"}
 
@@ -84,40 +84,55 @@ def score_guidance(f: GuidanceFeatures,
                     "serial_miss_risk": False},
         )
 
-    # Track record drives the baseline: beat_rate 0->10, .5->50, 1->90
-    L.baseline = 50.0 + (br - 0.5) * 80.0
+    # Delivery quality with beats > in-line, shrunk toward neutral for small
+    # samples. beat = full credit (exceeded its own guide); in-line = strong but
+    # not maximal (met the promise); miss = none. A prior of PRIOR pseudo-
+    # observations at 0.5 pulls a short record toward the middle, so a 2-quarter
+    # 100%-hit record no longer scores the same as a 12-quarter one — the fix for
+    # every 100%-hitter pinning to an identical 95.
     tracked = [o for o in f.outcomes if o in OUTCOMES]
+    n = len(tracked)
+    beats = tracked.count("beat")
+    inl   = tracked.count("in_line")
+    miss  = tracked.count("miss")
+    CREDIT_BEAT, CREDIT_IN_LINE, PRIOR = 1.0, 0.80, 3.0
+    raw = beats * CREDIT_BEAT + inl * CREDIT_IN_LINE
+    quality  = (raw + PRIOR * 0.5) / (n + PRIOR)     # sample-shrunk, ~0.5..~1.0
+    hit_rate  = (beats + inl) / n
+    beat_rate = beats / n
+
+    L.baseline = 100.0 * quality
     L.add("track_record", 0.0,
-          detail=f"hit {sum(o in ('beat','in_line') for o in tracked)}/"
-                 f"{len(tracked)} guidance targets (hit rate {br:.2f})",
+          detail=f"{beats} beat, {inl} in-line, {miss} miss over {n} period(s) "
+                 f"(hit {hit_rate:.0%}, beat {beat_rate:.0%}; "
+                 f"sample-adjusted quality {quality:.2f})",
           evidence=f.outcome_evidence)  # baseline carries it; delta 0 documents it
 
     serial = _serial_miss(f.outcomes)
     if serial:
-        L.add("serial_miss_risk", -15, "two or more consecutive recent misses",
+        L.add("serial_miss_risk", -10, "two or more consecutive recent misses",
               evidence=f.outcome_evidence)
 
-    # Current-quarter language adjustments (smaller than the record)
-    if f.is_specific:
-        L.add("specific_guidance", +5, "gave a concrete number/range",
-              evidence=f.language_evidence)
+    # Current-quarter language adjustments (small; the record dominates). The old
+    # constant "+5 gave specific guidance" is gone — it applied to every tracked
+    # company and only inflated the whole column uniformly, defeating the spread.
     if f.is_hedged:
         L.add("hedged_guidance", -5, "heavy conditionality around the guide",
               evidence=f.language_evidence)
     if f.withdrew_guidance:
-        L.add("withdrew_guidance", -12, "withdrew or declined to guide",
+        L.add("withdrew_guidance", -8, "withdrew or declined to guide",
               evidence=f.language_evidence)
 
-    n_ev = len(tracked)
-    conf, reason = confidence_label(n_evidence=n_ev, spread=ensemble_spread)
-    if n_ev < 4 and conf == "high":
-        conf, reason = "medium", f"short track record ({n_ev} periods)"
+    conf, reason = confidence_label(n_evidence=n, spread=ensemble_spread)
+    if n < 4 and conf == "high":
+        conf, reason = "medium", f"short track record ({n} periods)"
 
     return ScoreResult(
         signal="guidance", scorer_version=GUIDANCE_SCORING_VERSION,
         value=int(round(L.total)), ledger=L,
         confidence=conf, confidence_reason=reason,
-        extras={"hit_rate": round(br, 2), "tracked_periods": n_ev,
-                "serial_miss_risk": serial,
-                "recent_pattern": tracked[-6:]},
+        extras={"hit_rate": round(hit_rate, 2), "beat_rate": round(beat_rate, 2),
+                "quality": round(quality, 3), "tracked_periods": n,
+                "beats": beats, "in_line": inl, "misses": miss,
+                "serial_miss_risk": serial, "recent_pattern": tracked[-6:]},
     )

@@ -13,7 +13,18 @@ class Settings:
     # ── APIs ─────────────────────────────────────────────────────────────────
     OPENAI_API_KEY:   str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL:     str = os.getenv("OPENAI_MODEL", "gpt-4o")
-    EMBED_MODEL:      str = os.getenv("EMBED_MODEL", "text-embedding-3-small")
+    # Models offered in the dashboard dropdown (comma-separated in .env). The
+    # dropdown defaults to OPENAI_MODEL; the pick is applied PER RUN, threaded
+    # through run_comparison_pipeline — never by mutating settings, so one user's
+    # choice cannot change the model under another user's in-flight run. Add or
+    # remove a model here (or in .env) with no code change:
+    #   MODEL_CHOICES=gpt-4o-mini,gpt-4o,gpt-5.6-luna
+    MODEL_CHOICES:    list[str] = [
+        m.strip() for m in os.getenv(
+            "MODEL_CHOICES", "gpt-4o-mini,gpt-4o,gpt-5.6-luna"
+        ).split(",") if m.strip()
+    ]
+    EMBED_MODEL:      str = os.getenv("EMBED_MODEL", "text-embedding-3-large")
     OPENAI_TEMPERATURE: float = float(os.getenv("OPENAI_TEMPERATURE", "0.0"))
     # temperature=0 is not determinism. It removes deliberate sampling, but the
     # API still batches requests and reduces floats in a non-fixed order, so the
@@ -24,6 +35,12 @@ class Settings:
     OPENAI_SEED: int | None = (
         int(os.getenv("OPENAI_SEED")) if os.getenv("OPENAI_SEED", "").strip() else 7
     )
+    # Reasoning effort for GPT-5.x (Sol / Terra / Luna) and o-series models ONLY.
+    # Those reject temperature/seed and use this instead; gpt-4o ignores it.
+    # "low" because extraction is structured output, not a reasoning task — deep
+    # reasoning tokens (billed at the OUTPUT rate) are mostly wasted here. Raise
+    # to "medium"/"high" only if a reasoning model's extraction quality needs it.
+    OPENAI_REASONING_EFFORT: str = os.getenv("OPENAI_REASONING_EFFORT", "medium")
 
     # ── NSE / BSE direct fetch (no API key required — public endpoints) ───────
     # How many days after a quarter-end to keep searching for results /
@@ -126,6 +143,16 @@ class Settings:
     # locally instead of re-downloading the whole corpus.
     PDF_CACHE_DIR:    Path = BASE_DIR / "data" / "pdf_cache"
 
+    # ── Logging (per ticker-run: execution trace + token/cost ledger) ─────────
+    # agents/base.py opens two files per run under LOG_DIR — <TICKER>_<session>_
+    # <stamp>_<runid>.log (execution trace) and .cost.log (token/cost ledger) —
+    # with the session id in the filename so concurrent users' logs never mix.
+    LOG_DIR:          Path = BASE_DIR / "logs"
+    # Level for the per-run TRACE file only (console level is unchanged). DEBUG
+    # captures system_fingerprint and JSON-repair internals — a per-run file is
+    # exactly where that verbosity is cheap.
+    RUN_LOG_LEVEL:    str  = os.getenv("RUN_LOG_LEVEL", "DEBUG")
+
     # ── Chunking ──────────────────────────────────────────────────────────────
     CHUNK_SIZE:       int  = 512
     CHUNK_OVERLAP:    int  = 64
@@ -159,3 +186,4 @@ settings.NSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 settings.BSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 settings.PARSE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 settings.PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+settings.LOG_DIR.mkdir(parents=True, exist_ok=True)

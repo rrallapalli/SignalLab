@@ -1,7 +1,10 @@
 """agents/base.py – Shared agent infrastructure with retry and evidence formatting."""
 
 from __future__ import annotations
-import json, re, asyncio
+import json, re, asyncio, os, uuid
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -52,6 +55,210 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Model capability detection
+# ─────────────────────────────────────────────────────────────────────────────
+_REASONING_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """
+    Reasoning models — the GPT-5.x family (Sol / Terra / Luna) and the o-series —
+    reject `temperature` and `seed` and use a reasoning-effort control instead.
+    gpt-4o and gpt-4o-mini are NOT reasoning models and take temperature/seed.
+    """
+    return (model or "").lower().startswith(_REASONING_PREFIXES)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-call token accounting + per-run cost log (logs/<TICKER>_<stamp>.log)
+# ─────────────────────────────────────────────────────────────────────────────
+# USD per 1,000,000 tokens: (input, output). Reasoning tokens are counted within
+# `output` and billed at the output rate, so no special case is needed in the
+# cost math; they are logged separately for visibility. Update as prices change.
+_MODEL_PRICES: dict[str, tuple[float, float]] = {
+    "gpt-4o":        (2.50, 10.00),
+    "gpt-4o-mini":   (0.15,  0.60),
+    "gpt-5.6-luna":  (1.00,  6.00),
+    "gpt-5.6-terra": (2.50, 15.00),
+    "gpt-5.6-sol":   (5.00, 30.00),
+}
+
+
+def _price_for(model: str) -> tuple[float, float] | None:
+    m = (model or "").lower()
+    if m in _MODEL_PRICES:
+        return _MODEL_PRICES[m]
+    for k, v in _MODEL_PRICES.items():      # tolerate dated snapshots
+        if m.startswith(k):
+            return v
+    return None
+
+
+def _slug(s: str) -> str:
+    """Filesystem-safe token from a session id (or anything)."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "", str(s))[:24] or "anon"
+
+
+class RunCostLog:
+    """Accumulates every LLM call in one ticker run; writes logs/<file> live."""
+
+    def __init__(self, ticker: str, model: str | None, path: "Path | None" = None):
+        self.ticker = (ticker or "UNKNOWN").upper()
+        self.model = model or "?"
+        self.started = datetime.now(timezone.utc)
+        self.calls: list[dict] = []
+        if path is None:
+            stamp = self.started.strftime("%Y%m%d_%H%M%S")
+            log_dir = Path(getattr(settings, "LOG_DIR", "logs")).expanduser()
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            path = log_dir / f"{self.ticker}_{stamp}.cost.log"
+        self.path = path
+        self._write(f"# SignalLab run cost log — {self.ticker} — {self.started.isoformat()}")
+        self._write(f"# {'call':<22} {'model':<16} {'in':>8} {'out':>8} "
+                    f"{'reason':>7} {'cost_usd':>10}")
+
+    def _write(self, line: str) -> None:
+        try:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except OSError as e:
+            logger.warning(f"[cost] log write failed: {e}")
+
+    def record(self, model: str, in_tok: int, out_tok: int,
+               reason_tok: int, label: str = "") -> None:
+        price = _price_for(model)
+        cost = (in_tok / 1e6 * price[0] + out_tok / 1e6 * price[1]) if price else None
+        self.calls.append({"model": model, "in": in_tok, "out": out_tok,
+                           "reasoning": reason_tok, "cost": cost, "label": label})
+        self._write(f"  {label[:22]:<22} {model[:16]:<16} {in_tok:>8} {out_tok:>8} "
+                    f"{reason_tok:>7} {('%.5f' % cost) if cost is not None else 'n/a':>10}")
+
+    def finish(self) -> dict:
+        tin = sum(c["in"] for c in self.calls)
+        tout = sum(c["out"] for c in self.calls)
+        tr = sum(c["reasoning"] for c in self.calls)
+        tcost = sum(c["cost"] for c in self.calls if c["cost"] is not None)
+        unpriced = any(c["cost"] is None for c in self.calls)
+        secs = (datetime.now(timezone.utc) - self.started).total_seconds()
+        self._write("# " + "-" * 72)
+        self._write(f"# TOTAL  calls={len(self.calls)}  in={tin}  out={tout}  "
+                    f"reasoning={tr}  cost_usd={tcost:.5f}"
+                    + ("  (+unpriced call(s) — model not in price table)" if unpriced else "")
+                    + f"  elapsed={secs:.1f}s")
+        return {"calls": len(self.calls), "input_tokens": tin, "output_tokens": tout,
+                "reasoning_tokens": tr, "cost_usd": round(tcost, 5),
+                "unpriced": unpriced, "path": str(self.path)}
+
+
+# contextvar (not a module global) so concurrent dashboard runs each get their
+# own log — the same reason the model is passed per run, not via settings.
+_run_cost_log: ContextVar["RunCostLog | None"] = ContextVar("_run_cost_log", default=None)
+
+
+class run_cost_log:
+    """
+    Context manager: open a per-run cost log for `ticker` and finalise it on exit.
+    Wrap a whole ticker run in this; every llm_reason() call inside records into
+    it automatically (via a contextvar, so it survives asyncio.gather).
+    """
+    def __init__(self, ticker: str, model: str | None = None,
+                 session_id: str | None = None):
+        self.ticker, self.model, self.session_id = ticker, model, session_id
+        # Unique per run. Tags this run's log records so its trace sink captures
+        # ONLY them — the mechanism that keeps concurrent (multi-user) runs in
+        # separate files instead of every open sink capturing every run.
+        self.run_id = uuid.uuid4().hex[:8]
+        self._token = None
+        self._sink_id = None
+        self._ctx = None
+        self.log: "RunCostLog | None" = None
+        self.trace_path: "Path | None" = None
+
+    def __enter__(self) -> "RunCostLog":
+        tk = (self.ticker or "UNKNOWN").upper()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        log_dir = Path(getattr(settings, "LOG_DIR", "logs")).expanduser()
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        # All runs share one folder; the session id and a unique run_id live in
+        # the filename, so concurrent users' files never collide and are easy to
+        # filter (ls TICKER_session_*  /  ls *_<session>_*).
+        sess = _slug(self.session_id) if self.session_id else "nosession"
+        base = f"{tk}_{sess}_{stamp}_{self.run_id}"
+        self.trace_path = log_dir / f"{base}.log"        # execution trace
+        cost_path       = log_dir / f"{base}.cost.log"   # token/cost ledger
+
+        # Bind run_id onto every log emitted within this run's context. loguru's
+        # contextualize is contextvar-based, so the tag propagates across
+        # asyncio.gather to the per-quarter tasks — no changes to any call site.
+        self._ctx = logger.contextualize(run_id=self.run_id)
+        self._ctx.__enter__()
+
+        # Execution trace: a temporary loguru sink FILTERED to this run_id, so it
+        # captures only this run's records even while other runs' sinks are open.
+        try:
+            _rid = self.run_id
+            self._sink_id = logger.add(
+                str(self.trace_path),
+                level=getattr(settings, "RUN_LOG_LEVEL", "DEBUG"),
+                filter=lambda rec, r=_rid: rec["extra"].get("run_id") == r,
+                enqueue=True, backtrace=False, diagnose=False,
+            )
+        except Exception as e:
+            self._sink_id = None
+            logger.warning(f"[log] could not open run trace log: {e}")
+
+        self.log = RunCostLog(self.ticker, self.model, path=cost_path)
+        self._token = _run_cost_log.set(self.log)
+        return self.log
+
+    def __exit__(self, *exc) -> None:
+        try:
+            s = self.log.finish()
+            logger.info(
+                f"[cost] {self.ticker}: {s['calls']} calls, ${s['cost_usd']}"
+                + (" (some unpriced)" if s['unpriced'] else "")
+                + f" → {s['path']}  |  trace → {self.trace_path}"
+            )
+        finally:
+            if self._token is not None:
+                _run_cost_log.reset(self._token)
+            if self._sink_id is not None:
+                try:
+                    logger.remove(self._sink_id)   # flushes the enqueued sink
+                except Exception:
+                    pass
+            if self._ctx is not None:
+                try:
+                    self._ctx.__exit__(*exc)
+                except Exception:
+                    pass
+
+
+def _extract_usage(resp) -> tuple[int, int, int]:
+    """(input, output, reasoning) token counts from a LangChain response,
+    tolerant of both usage_metadata and response_metadata['token_usage']."""
+    um = getattr(resp, "usage_metadata", None) or {}
+    if um:
+        return (
+            int(um.get("input_tokens", 0) or 0),
+            int(um.get("output_tokens", 0) or 0),
+            int((um.get("output_token_details") or {}).get("reasoning", 0) or 0),
+        )
+    tu = (getattr(resp, "response_metadata", {}) or {}).get("token_usage", {}) or {}
+    return (
+        int(tu.get("prompt_tokens", 0) or 0),
+        int(tu.get("completion_tokens", 0) or 0),
+        int((tu.get("completion_tokens_details") or {}).get("reasoning_tokens", 0) or 0),
+    )
+
+
 class BaseAgent:
     """
     Base for all signal agents.
@@ -76,6 +283,8 @@ class BaseAgent:
         self.retrieval_mode: str = "unknown"
         self.failed_queries: list[str] = []
 
+        reasoning = _is_reasoning_model(self.model_name)
+
         model_kwargs: dict[str, Any] = {
             # Forces the API itself to guarantee syntactically valid JSON output,
             # instead of relying on the model voluntarily following "return only
@@ -83,15 +292,29 @@ class BaseAgent:
             # quotes/apostrophes in quoted evidence text).
             "response_format": {"type": "json_object"},
         }
-        if settings.OPENAI_SEED is not None:
-            model_kwargs["seed"] = settings.OPENAI_SEED
-
-        self.llm = ChatOpenAI(
+        llm_kwargs: dict[str, Any] = dict(
             model=self.model_name,
-            temperature=settings.OPENAI_TEMPERATURE,
             api_key=settings.OPENAI_API_KEY,
             model_kwargs=model_kwargs,
         )
+
+        if reasoning:
+            # Reasoning models (GPT-5.x incl. Luna, o-series) reject temperature
+            # and seed. Omit both and use reasoning effort instead — default LOW,
+            # because extraction is structured output, not a reasoning task, so
+            # paying for deep reasoning tokens is mostly waste. Determinism from
+            # seed/temperature is unavailable here, but the SCORES stay
+            # reproducible regardless: they are computed in code from the
+            # extracted features, not judged by the model.
+            effort = getattr(settings, "OPENAI_REASONING_EFFORT", "low")
+            if effort:
+                model_kwargs["reasoning_effort"] = effort
+        else:
+            llm_kwargs["temperature"] = settings.OPENAI_TEMPERATURE
+            if settings.OPENAI_SEED is not None:
+                model_kwargs["seed"] = settings.OPENAI_SEED
+
+        self.llm = ChatOpenAI(**llm_kwargs)
 
     def rag_retrieve(
         self,
@@ -244,6 +467,16 @@ class BaseAgent:
             fp = (getattr(resp, "response_metadata", {}) or {}).get("system_fingerprint")
             if fp:
                 logger.debug(f"[llm] {self.model_name} system_fingerprint={fp}")
+            # Per-call token accounting into the active run's cost log, if one is
+            # open (run_cost_log context manager). Best-effort; never fatal.
+            _clog = _run_cost_log.get()
+            if _clog is not None:
+                try:
+                    _in, _out, _rea = _extract_usage(resp)
+                    _clog.record(self.model_name, _in, _out, _rea,
+                                 label=type(self).__name__)
+                except Exception as e:
+                    logger.debug(f"[cost] usage capture failed: {e}")
             raw = resp.content.strip()
             raw = re.sub(r"^```[a-z]*\n?", "", raw)
             raw = re.sub(r"\n?```$", "", raw)

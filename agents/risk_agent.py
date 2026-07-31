@@ -173,13 +173,33 @@ quarter and assess severity. Do not estimate any prior quarter.
             _direction = ("increasing" if _up > _down else
                           "decreasing" if _down > _up else "stable")
 
+            # summary narrated from the COMPUTED rollups (the model no longer
+            # sees the prior quarter). Grounded, hash-cached, deterministic
+            # fallback. Severity noted per newly-material / escalating risk.
+            _sev_of = {x.risk: x.severity.value for x in risks}
+            _rdrivers = []
+            if _new: _rdrivers.append("newly material: " +
+                                      ", ".join(f"{r} ({_sev_of.get(r,'')})" for r in _new))
+            if _esc: _rdrivers.append("escalating: " +
+                                      ", ".join(f"{r} ({_sev_of.get(r,'')})" for r in _esc))
+            if _dim: _rdrivers.append("diminishing: " + ", ".join(_dim))
+            if not _rdrivers:
+                _rdrivers = ["no material change in the risk profile this quarter"]
+            _rfallback = f"Risk profile is {_direction}. " + "; ".join(_rdrivers) + "."
+            _rfacts = {
+                "signal": "risk emergence (whether the disclosed risk profile is worsening or easing)",
+                "headline": f"Risk profile: {_direction}",
+                "drivers": _rdrivers,
+                "fallback": _rfallback,
+            }
+
             return RiskSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
                 risks=risks,
                 new_risks=_new, escalating=_esc, diminishing=_dim,
                 overall_risk_direction=_direction,
-                summary=data.get("summary") or "",
+                summary=_rfallback,
                 citations=citations,
                 manifest={
                     "signal": "risk",
@@ -188,6 +208,7 @@ quarter and assess severity. Do not estimate any prior quarter.
                     "prior_available": _prior_available,
                     "risks": _manifest_items,
                     "overall_risk_direction": _direction,
+                    "narration": _rfacts,
                 },
             )
         except Exception as e:

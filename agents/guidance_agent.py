@@ -207,6 +207,7 @@ SUBSEQUENT quarters. Classify each trackable item's outcome.
             _serial_metrics = _serial_miss_metrics(items)
             _beat_rate = round(_beats / _tracked, 3)   # beats-only (dashboard "Beat Rate")
             _recent_pattern = [i.outcome for i in items if i.outcome][:12]
+            _met = _beats + _in_line
 
             manifest = {
                 **result.to_dict(),
@@ -214,6 +215,23 @@ SUBSEQUENT quarters. Classify each trackable item's outcome.
                            "in_line": _in_line, "withdrawals": _withdrawals},
                 "serial_miss_metrics": _serial_metrics,
             }
+
+            _fallback = _guidance_summary(result.value, _beats, _in_line,
+                                          _misses, _tracked, bool(_serial_metrics))
+            _drivers = [
+                f"hit {_met} of {_tracked} guidance targets "
+                f"({_met/_tracked:.0%}): {_beats} beat, {_in_line} in-line, {_misses} miss",
+            ]
+            if _serial_metrics:
+                _drivers.append(f"serial-miss risk on: {', '.join(_serial_metrics)}")
+            # Narration done once per quarter in the orchestrator; stash facts.
+            manifest["narration"] = {
+                "signal": "guidance credibility (0-100, reliability of hitting its own guidance)",
+                "headline": f"Guidance credibility {result.value}/100",
+                "drivers": _drivers,
+                "fallback": _fallback,
+            }
+            _summary = _fallback
 
             return GuidanceSignal(
                 ticker=ticker, company=company,
@@ -226,8 +244,7 @@ SUBSEQUENT quarters. Classify each trackable item's outcome.
                 beat_rate=_beat_rate,
                 serial_miss_risk=bool(_serial_metrics),
                 recent_pattern=_recent_pattern,
-                summary=_guidance_summary(result.value, _beats, _in_line,
-                                          _misses, _tracked, bool(_serial_metrics)),
+                summary=_summary,
                 citations=citations,
                 manifest=manifest,
             )

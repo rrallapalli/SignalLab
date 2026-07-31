@@ -31,10 +31,12 @@ DUCKDB_ATTRS = ["DUCKDB_PATH", "SIGNAL_DB_PATH", "SIGNAL_STORE_PATH",
                 "DB_PATH", "DUCKDB_FILE"]
 CACHE_ATTRS = ["PARSE_CACHE_DIR", "CACHE_DIR", "DOCLING_CACHE_DIR",
                "PARSER_CACHE_DIR"]
+NARRATION_ATTRS = ["NARRATION_CACHE_DIR", "NARRATOR_CACHE_DIR"]
 
 CHROMA_FALLBACK = "data/chroma"
 DUCKDB_FALLBACK = "data/signals.duckdb"
 CACHE_FALLBACK = "data/parse_cache"
+NARRATION_FALLBACK = "data/narration_cache"
 
 
 def _from_config(attrs: list[str]):
@@ -77,9 +79,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Reset all SignalLab state.")
     p.add_argument("--yes", action="store_true", help="actually delete")
     p.add_argument("--chroma"); p.add_argument("--duckdb"); p.add_argument("--cache")
+    p.add_argument("--narration")
     p.add_argument("--keep-chroma", action="store_true")
     p.add_argument("--keep-duckdb", action="store_true")
     p.add_argument("--keep-cache", action="store_true")
+    p.add_argument("--keep-narration", action="store_true")
     a = p.parse_args()
 
     targets: list[tuple[str, Path]] = []
@@ -89,6 +93,8 @@ def main() -> int:
         targets.append(("DuckDB", resolve(a.duckdb, DUCKDB_ATTRS, DUCKDB_FALLBACK)))
     if not a.keep_cache:
         targets.append(("Parse cache", resolve(a.cache, CACHE_ATTRS, CACHE_FALLBACK)))
+    if not a.keep_narration:
+        targets.append(("Narration cache", resolve(a.narration, NARRATION_ATTRS, NARRATION_FALLBACK)))
 
     print("SignalLab reset — targets:")
     any_present = any(show(lbl, pth) for lbl, pth in targets)

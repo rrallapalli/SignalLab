@@ -535,6 +535,24 @@ sentiment. Do not estimate any prior quarter.
                         "negative" if _neg > _pos else
                         "mixed" if (_pos and _neg) else "neutral")
 
+            # shift_summary is narrated from the COMPUTED status rollups (the
+            # model no longer sees the prior quarter, so its own prose could not
+            # describe a shift). Grounded, hash-cached, deterministic fallback.
+            _sdrivers = []
+            if _accel: _sdrivers.append(f"accelerating: {', '.join(_accel)}")
+            if _emerg: _sdrivers.append(f"newly emerging: {', '.join(_emerg)}")
+            if _risky: _sdrivers.append(f"turning risky: {', '.join(_risky)}")
+            if _fade:  _sdrivers.append(f"fading: {', '.join(_fade)}")
+            if not _sdrivers:
+                _sdrivers = ["no material theme shifts versus the prior quarter"]
+            _sfallback = f"Narrative shift is {_overall}. " + "; ".join(_sdrivers) + "."
+            _nfacts = {
+                "signal": "narrative shift (how management's key themes moved vs the prior quarter)",
+                "headline": f"Overall narrative shift: {_overall}",
+                "drivers": _sdrivers,
+                "fallback": _sfallback,
+            }
+
             return NarrativeSignal(
                 ticker=ticker, company=company,
                 quarter=quarter, fiscal_year=fiscal_year,
@@ -542,7 +560,7 @@ sentiment. Do not estimate any prior quarter.
                 accelerating=_accel, emerging=_emerg,
                 fading=_fade, newly_risky=_risky,
                 overall_shift=_overall,
-                shift_summary=data.get("shift_summary") or "",
+                shift_summary=_sfallback,
                 citations=citations,
                 manifest={
                     "signal": "narrative",
@@ -551,6 +569,7 @@ sentiment. Do not estimate any prior quarter.
                     "prior_available": _prior_available,
                     "themes": _manifest_items,
                     "overall_shift": _overall,
+                    "narration": _nfacts,
                 },
             )
         except Exception as e:

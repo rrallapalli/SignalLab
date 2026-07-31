@@ -31,6 +31,7 @@ from ingestion.chunker import chunk_document
 from store.vector_store import VectorStore
 from store.signal_store import SignalStore
 from agents.confidence_agent import ConfidenceAgent
+from agents.base import run_cost_log
 from agents.narrative_agent import NarrativeAgent
 from agents.guidance_agent import GuidanceAgent
 from agents.risk_agent import RiskAgent
@@ -105,7 +106,11 @@ def _noop_progress(event: str, detail: dict) -> None:
 #                 Each quarter extracts its own counts once; comparison is against
 #                 stored data. Removes the prior-chunk retrieval; adds
 #                 prior_available to the manifest. Re-score to populate baselines.
-SIGNAL_VERSION = "2026-07-30.4"
+#   2026-07-30.5  guidance scorer 2.x: beats now outrank in-line and small
+#                 samples are shrunk toward neutral, so 100%-hitters no longer
+#                 all pin to 95. Stored guidance scores predate this and must
+#                 re-score.
+SIGNAL_VERSION = "2026-07-30.5"
 
 
 def _retrieval_profile() -> str:
@@ -399,41 +404,68 @@ async def _run_signals_for_quarter(
         ("risk",       lambda: agents["risk"].run(ticker, company, quarter, year, prior_q, prior_yr, store=ss)),
     ]
 
+    # Phase 1 — compute all four signals (deterministic scores + narration facts).
+    computed: dict[str, object] = {}
     for agent_name, agent_fn in agent_defs:
         try:
-            result = await agent_fn()
-
-            if agent_name == "confidence":
-                conf_sig = result
-                await _save_safe(ss.save_confidence, result, f"{label}/confidence", errors)
-            elif agent_name == "narrative":
-                narr_sig = result
-                await _save_safe(ss.save_narrative, result, f"{label}/narrative", errors)
-            elif agent_name == "guidance":
-                guid_sig = result
-                await _save_safe(ss.save_guidance, result, f"{label}/guidance", errors)
-            elif agent_name == "risk":
-                risk_sig = result
-                await _save_safe(ss.save_risk, result, f"{label}/risk", errors)
-
-            # Persist the deterministic scoring ledger (audit trail) for any
-            # agent that produced one. Guarded, so it is a no-op for agents not
-            # yet converted to deterministic scoring.
-            if getattr(result, "manifest", None) is not None:
-                try:
-                    ss.save_manifest(agent_name, result)
-                except Exception as e:
-                    logger.warning(f"[signals] {label}/{agent_name}: manifest save failed: {e}")
-
+            computed[agent_name] = await agent_fn()
             logger.success(f"[signals] {ticker} {label}/{agent_name} ✅")
-
         except Exception as e:
             msg = f"{label}/{agent_name}: {e}"
             errors.append(msg)
             logger.error(f"[signals] ❌ {msg}")
-
         # Small gap between agents to stay within rate limits
         await asyncio.sleep(0.4)
+
+    # Phase 2 — narrate ONCE for the quarter: a single batched LLM call across
+    # all four signals (per-signal hash-cached), turning each deterministic
+    # ledger into prose. Any failure leaves each signal's deterministic summary
+    # in place, so the pipeline never depends on narration.
+    try:
+        from narration import narrate_batch
+        _items = [
+            (nm, r.manifest["narration"])
+            for nm, r in computed.items()
+            if getattr(r, "manifest", None) and isinstance(r.manifest, dict)
+            and r.manifest.get("narration")
+        ]
+        if _items:
+            _narrated = await narrate_batch(_items, agents["confidence"].llm_reason)
+            for nm, r in computed.items():
+                text = _narrated.get(nm)
+                if not text:
+                    continue
+                if nm == "narrative":
+                    r.shift_summary = text   # narrative's prose field
+                else:
+                    r.summary = text
+    except Exception as e:
+        logger.warning(f"[signals] {label}: batched narration failed ({e}); "
+                       f"using deterministic summaries.")
+    finally:
+        # The narration facts were a transient hand-off to the narrator; keep
+        # them out of the persisted manifest (the ledger already carries them).
+        for r in computed.values():
+            if getattr(r, "manifest", None) and isinstance(r.manifest, dict):
+                r.manifest.pop("narration", None)
+
+    # Phase 3 — persist (summaries are now narrated).
+    _savers = {"confidence": ss.save_confidence, "narrative": ss.save_narrative,
+               "guidance": ss.save_guidance, "risk": ss.save_risk}
+    for agent_name in ("confidence", "narrative", "guidance", "risk"):
+        result = computed.get(agent_name)
+        if result is None:
+            continue
+        if   agent_name == "confidence": conf_sig = result
+        elif agent_name == "narrative":  narr_sig = result
+        elif agent_name == "guidance":   guid_sig = result
+        elif agent_name == "risk":       risk_sig = result
+        await _save_safe(_savers[agent_name], result, f"{label}/{agent_name}", errors)
+        if getattr(result, "manifest", None) is not None:
+            try:
+                ss.save_manifest(agent_name, result)
+            except Exception as e:
+                logger.warning(f"[signals] {label}/{agent_name}: manifest save failed: {e}")
 
     # A degraded run reads a different evidence set than the fingerprint claims.
     # The profile in the hash describes the CONFIGURED retrieval path; if the
@@ -630,6 +662,7 @@ async def run_comparison_pipeline(
     ss: SignalStore | None = None,
     model: str | None = None,
     progress: ProgressFn | None = None,
+    session_id: str | None = None,
 ) -> dict:
     progress = progress or _noop_progress
     if vs is None: vs = VectorStore()
@@ -664,20 +697,21 @@ async def run_comparison_pipeline(
         "model":            model,
     }
 
-    final: dict[str, Any] = {}
-    async for chunk in graph.astream(initial, stream_mode="updates"):
-        node = next(iter(chunk))
-        final.update(chunk[node])
+    with run_cost_log(ticker, model, session_id=session_id):
+        final: dict[str, Any] = {}
+        async for chunk in graph.astream(initial, stream_mode="updates"):
+            node = next(iter(chunk))
+            final.update(chunk[node])
 
-    progress("pipeline_done", {"docs_ingested": final.get("docs_ingested", 0)})
-    return {
-        "latest":        final.get("latest_bundle"),
-        "qoq":           final.get("qoq_bundle"),
-        "yoy":           final.get("yoy_bundle"),
-        "latest_label":  format_period(lq, ly),
-        "qoq_label":     format_period(qq, qy),
-        "yoy_label":     format_period(yq, yy),
-        "docs_ingested": final.get("docs_ingested", 0),
-        "chunks_by_quarter": final.get("chunks_by_quarter", {}),
-        "errors":        final.get("errors", []),
-    }
+        progress("pipeline_done", {"docs_ingested": final.get("docs_ingested", 0)})
+        return {
+            "latest":        final.get("latest_bundle"),
+            "qoq":           final.get("qoq_bundle"),
+            "yoy":           final.get("yoy_bundle"),
+            "latest_label":  format_period(lq, ly),
+            "qoq_label":     format_period(qq, qy),
+            "yoy_label":     format_period(yq, yy),
+            "docs_ingested": final.get("docs_ingested", 0),
+            "chunks_by_quarter": final.get("chunks_by_quarter", {}),
+            "errors":        final.get("errors", []),
+        }

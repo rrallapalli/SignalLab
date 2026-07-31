@@ -166,17 +166,26 @@ Extract the confidence features for THIS quarter, per the schema. Quote verbatim
             tone = _tone_label(curr_feats)
             drivers = [f"{i.label}: {i.detail}"
                        for i in result.ledger.items if abs(i.delta) > 1e-9][:4]
-            # "reliability" = how much to trust THIS reading (evidence
-            # sufficiency), deliberately NOT called "confidence": that word is
-            # the signal itself.
-            summary = (f"Management confidence {result.value}/10. "
-                       f"Read reliability: {result.confidence} "
-                       f"({result.confidence_reason})."
-                       + (f" {drivers[0]}." if drivers else ""))
+            # Narration (fluent prose over the LEDGER) happens ONCE per quarter
+            # in the orchestrator, batched across all four signals. The agent
+            # supplies the facts + a deterministic fallback (both stored in the
+            # manifest); `summary` is the fallback until narration replaces it.
+            _reliability = f"read reliability: {result.confidence} ({result.confidence_reason})"
+            _facts = {
+                "signal": "management confidence (0-10 scale, higher = more confident, less hedged)",
+                "headline": f"Management confidence {result.value}/10 ({_reliability})",
+                "drivers": [i.detail for i in result.ledger.items if abs(i.delta) > 1e-9],
+                "fallback": (f"Management confidence {result.value}/10. "
+                             f"Read reliability: {result.confidence} "
+                             f"({result.confidence_reason})."
+                             + (f" {drivers[0]}." if drivers else "")),
+            }
+            summary = _facts["fallback"]
             _md = result.to_dict()
             _md["reliability"] = _md.pop("confidence")
             _md["reliability_reason"] = _md.pop("confidence_reason")
-            manifest = {**_md, "sub_dimensions": subdims, "tone": tone}
+            manifest = {**_md, "sub_dimensions": subdims, "tone": tone,
+                        "narration": _facts}
 
             return ConfidenceSignal(
                 ticker=ticker, company=company,

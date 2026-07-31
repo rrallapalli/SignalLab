@@ -1,0 +1,123 @@
+2026-07-31 11:37:58.135 | INFO     | agents.orchestrator:ingest_all:258 - [ingest] INFY → Q4 FY26 | Q3 FY26 | Q4 FY25
+2026-07-31 11:38:04.632 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q1 2027 — outside requested set; skipped.
+2026-07-31 11:38:04.636 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Outcome of Board Meeting Infosys Limited has submi' reports on Q1 2027 — outside requested set; skipped.
+2026-07-31 11:38:04.647 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q2 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.650 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q2 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.651 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Outcome of Board Meeting Infosys Limited has submi' reports on Q2 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.653 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q1 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.654 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Outcome of Board Meeting Infosys Limited has submi' reports on Q1 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.655 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q1 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.655 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q1 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.656 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q1 2026 — outside requested set; skipped.
+2026-07-31 11:38:04.669 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Updates Infosys Limited has informed the Exchange ' reports on Q3 2025 — outside requested set; skipped.
+2026-07-31 11:38:04.669 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Outcome of Board Meeting Infosys Limited has infor' reports on Q3 2025 — outside requested set; skipped.
+2026-07-31 11:38:04.670 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Financial Result Updates  Infosys Limited has subm' reports on Q3 2025 — outside requested set; skipped.
+2026-07-31 11:38:04.671 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Enclosed Announcement Under Regulation 30 (LODR)-E' reports on Q1 2027 — outside requested set; skipped.
+2026-07-31 11:38:04.671 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Financial Results for the quarter ended June 30, 2' reports on Q1 2027 — outside requested set; skipped.
+2026-07-31 11:38:04.672 | DEBUG    | ingestion.fetcher:fetch_all_periods:522 - [fetch] 'Please find enclosed the Outcome of Board Meeting ' reports on Q1 2027 — outside requested set; skipped.
+2026-07-31 11:38:05.746 | INFO     | ingestion.parser:_build_converter:259 - [parse] Accelerator: device=auto threads=4
+2026-07-31 11:38:05.747 | INFO     | ingestion.parser:_build_converter:272 - [parse] Loading Docling models (ocr=False) — first document only…
+2026-07-31 11:38:05.785 | SUCCESS  | ingestion.parser:_build_converter:277 - [parse] Docling ready.
+2026-07-31 11:38:05.888 | DEBUG    | ingestion.parser:extract_text:383 - [parse] Infosys_30062026163341_SE_Infosys_45th_AGM_transcript.pdf: doc_type=earnings_call is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:05.892 | DEBUG    | ingestion.parser:extract_text:383 - [parse] fd5caf6d-2450-42ce-bdae-6ad7198d1810.pdf: doc_type=earnings_call is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:05.931 | DEBUG    | ingestion.parser:extract_text:383 - [parse] Infosys_27042026203405_Transcript_April232026_Q4.pdf: doc_type=earnings_call is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:06.055 | INFO     | ingestion.parser:extract_text:391 - [parse] dc7eb287-b51d-483a-9628-4da4fbfa1a74.pdf: 375 pages exceeds DOCLING_MAX_PAGES (250) — using fast pypdf extraction.
+2026-07-31 11:38:06.394 | DEBUG    | ingestion.parser:extract_text:383 - [parse] Infosys_19012026222220_SEfiling_Earningscalltranscript_19012026.pdf: doc_type=earnings_call is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:06.413 | INFO     | ingestion.parser:extract_text:391 - [parse] INFY_15062026210015_Form20F_June152026.pdf: 375 pages exceeds DOCLING_MAX_PAGES (250) — using fast pypdf extraction.
+2026-07-31 11:38:06.904 | DEBUG    | ingestion.parser:extract_text:383 - [parse] 089c483b-7ab1-476a-8314-45bca94336f2.pdf: doc_type=annual_report is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:07.290 | DEBUG    | ingestion.parser:extract_text:383 - [parse] 19dd605c-2b6b-4084-8dca-9d578a3eb7a0.pdf: doc_type=annual_report is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:07.354 | DEBUG    | ingestion.parser:extract_text:383 - [parse] faf62796-f4a0-4d80-b545-f0eedf65884e.pdf: doc_type=annual_report is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:08.693 | INFO     | ingestion.parser:extract_text:391 - [parse] Infosys_23042026170027_outcome.pdf: 379 pages exceeds DOCLING_MAX_PAGES (250) — using fast pypdf extraction.
+2026-07-31 11:38:09.924 | DEBUG    | ingestion.parser:extract_text:383 - [parse] Infosys_24022026183902_AIDayTranscript17022026.pdf: doc_type=earnings_call is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:09.994 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_19012026222220_SEfiling_Earningscalltranscript_19012026.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:11.352 | DEBUG    | ingestion.parser:extract_text:383 - [parse] Infosys_22042025213147_SEfiling_Earningscalltranscript.pdf: doc_type=earnings_call is not table-bearing — using fast pypdf extraction.
+2026-07-31 11:38:11.431 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit dc7eb287-b51d-483a-9628-4da4fbfa1a74.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:11.431 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit INFY_15062026210015_Form20F_June152026.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:13.347 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_27042026203405_Transcript_April232026_Q4.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:14.568 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_22042025213147_SEfiling_Earningscalltranscript.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:15.527 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_30062026163341_SE_Infosys_45th_AGM_transcript.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:15.790 | INFO     | ingestion.parser:extract_text:391 - [parse] Infosys_17042025162119_BM_Outcome_April172025.pdf: 380 pages exceeds DOCLING_MAX_PAGES (250) — using fast pypdf extraction.
+2026-07-31 11:38:16.170 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit fd5caf6d-2450-42ce-bdae-6ad7198d1810.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:17.333 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_24022026183902_AIDayTranscript17022026.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:22.572 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit faf62796-f4a0-4d80-b545-f0eedf65884e.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:22.577 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_17042025162119_BM_Outcome_April172025.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:22.629 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit 089c483b-7ab1-476a-8314-45bca94336f2.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:22.641 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit 19dd605c-2b6b-4084-8dca-9d578a3eb7a0.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:22.807 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_23042026170027_outcome.pdf — re-parsed locally (how=pypdf)
+2026-07-31 11:38:27.231 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_30042026152236_PR_30042026.pdf — re-parsed locally (how=docling)
+2026-07-31 11:38:31.440 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit INFY_30042026200702_Outcome_Final.pdf — re-parsed locally (how=docling)
+2026-07-31 11:39:19.644 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_14012026160405_BM_Outcome_January142026.pdf — re-parsed locally (how=docling)
+2026-07-31 11:39:20.318 | DEBUG    | ingestion.fetcher:_download_pdf_text:350 - [pdf-cache] hit Infosys_05062025092103_Clarification_letter.pdf — re-parsed locally (how=docling)
+2026-07-31 11:39:20.319 | DEBUG    | ingestion.fetcher:fetch_all_periods:570 - [fetch] Duplicate content: Live/fd5caf6d-2450-42ce-bdae-6ad7198d1810.pdf is identical to 2026163341_SE_Infosys_45th_AGM_transcript.pdf — keeping one copy.
+2026-07-31 11:39:20.324 | DEBUG    | ingestion.fetcher:fetch_all_periods:570 - [fetch] Duplicate content: te/INFY_15062026210015_Form20F_June152026.pdf is identical to Live/dc7eb287-b51d-483a-9628-4da4fbfa1a74.pdf — keeping one copy.
+2026-07-31 11:39:20.325 | DEBUG    | ingestion.fetcher:fetch_all_periods:570 - [fetch] Duplicate content: Live/faf62796-f4a0-4d80-b545-f0eedf65884e.pdf is identical to Live/089c483b-7ab1-476a-8314-45bca94336f2.pdf — keeping one copy.
+2026-07-31 11:39:20.329 | INFO     | ingestion.fetcher:fetch_all_periods:588 - [fetch] Dropped 3 duplicate document(s) served under more than one URL (typically the same filing from both NSE and BSE).
+2026-07-31 11:39:20.329 | SUCCESS  | ingestion.fetcher:fetch_all_periods:592 - Fetched 14 documents for INFY across 3 period(s) [Q4 2026:8, Q3 2026:3, Q4 2025:3] (NSE symbol=INFY, BSE scripcode=500209)
+2026-07-31 11:39:23.473 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 140 chunks
+2026-07-31 11:39:24.602 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 139 chunks
+2026-07-31 11:39:25.235 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 119 chunks
+2026-07-31 11:39:25.621 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 26 chunks
+2026-07-31 11:39:25.907 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 29 chunks
+2026-07-31 11:39:26.585 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 146 chunks
+2026-07-31 11:39:27.318 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 146 chunks
+2026-07-31 11:39:28.066 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 159 chunks
+2026-07-31 11:39:28.070 | INFO     | agents.orchestrator:_embed_period_docs:232 - [ingest] Q4 FY26: 8 docs, 904 chunks
+2026-07-31 11:39:28.803 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 141 chunks
+2026-07-31 11:39:29.466 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 142 chunks
+2026-07-31 11:39:29.857 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 47 chunks
+2026-07-31 11:39:29.860 | INFO     | agents.orchestrator:_embed_period_docs:232 - [ingest] Q3 FY26: 3 docs, 330 chunks
+2026-07-31 11:39:30.510 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 137 chunks
+2026-07-31 11:39:31.141 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 119 chunks
+2026-07-31 11:39:31.314 | DEBUG    | store.vector_store:upsert_chunks:113 - Upserted 3 chunks
+2026-07-31 11:39:31.316 | INFO     | agents.orchestrator:_embed_period_docs:232 - [ingest] Q4 FY25: 3 docs, 259 chunks
+2026-07-31 11:39:31.316 | INFO     | agents.orchestrator:ingest_all:295 - [ingest]   Q4 FY26: 904 chunks ✅
+2026-07-31 11:39:31.317 | INFO     | agents.orchestrator:ingest_all:295 - [ingest]   Q3 FY26: 330 chunks ✅
+2026-07-31 11:39:31.317 | INFO     | agents.orchestrator:ingest_all:295 - [ingest]   Q4 FY25: 259 chunks ✅
+2026-07-31 11:39:31.317 | SUCCESS  | agents.orchestrator:ingest_all:297 - [ingest] Total: 14 docs, 1493 chunks
+2026-07-31 11:39:31.325 | INFO     | agents.orchestrator:run_all_signals:583 - [signals] Running 3 quarters (staggered) for INFY
+2026-07-31 11:39:31.336 | INFO     | agents.orchestrator:_run_signals_for_quarter:384 - [signals] INFY Q4 FY26: running agents (904 chunks available)
+2026-07-31 11:39:31.368 | INFO     | agents.confidence_agent:run:123 - [ConfidenceAgent] Running for INFY Q4 2026
+2026-07-31 11:39:32.486 | INFO     | retrieval.reranker:_get_model:46 - [rerank] Loading cross-encoder cross-encoder/ms-marco-MiniLM-L-6-v2 (first use only)…
+2026-07-31 11:39:36.786 | SUCCESS  | retrieval.reranker:_get_model:48 - [rerank] Cross-encoder ready.
+2026-07-31 11:39:37.545 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 21 candidates → top 12 for 6 queries
+2026-07-31 11:39:38.573 | INFO     | agents.orchestrator:_run_signals_for_quarter:384 - [signals] INFY Q3 FY26: running agents (330 chunks available)
+2026-07-31 11:39:38.581 | INFO     | agents.confidence_agent:run:123 - [ConfidenceAgent] Running for INFY Q3 2026
+2026-07-31 11:39:40.725 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 19 candidates → top 12 for 6 queries
+2026-07-31 11:39:40.734 | INFO     | agents.orchestrator:_run_signals_for_quarter:384 - [signals] INFY Q4 FY25: running agents (259 chunks available)
+2026-07-31 11:39:40.738 | INFO     | agents.confidence_agent:run:123 - [ConfidenceAgent] Running for INFY Q4 2025
+2026-07-31 11:39:42.348 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 23 candidates → top 12 for 6 queries
+2026-07-31 11:39:45.266 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY26/confidence ✅
+2026-07-31 11:39:45.668 | INFO     | agents.narrative_agent:run:392 - [NarrativeAgent] Running for INFY Q4 2026 (sector=IT Services / Technology)
+2026-07-31 11:39:49.349 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 43 candidates → top 12 for 10 queries
+2026-07-31 11:39:49.362 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY25/confidence ✅
+2026-07-31 11:39:49.764 | INFO     | agents.narrative_agent:run:392 - [NarrativeAgent] Running for INFY Q4 2025 (sector=IT Services / Technology)
+2026-07-31 11:39:53.158 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 42 candidates → top 12 for 10 queries
+2026-07-31 11:39:53.180 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q3 FY26/confidence ✅
+2026-07-31 11:39:53.582 | INFO     | agents.narrative_agent:run:392 - [NarrativeAgent] Running for INFY Q3 2026 (sector=IT Services / Technology)
+2026-07-31 11:39:56.816 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 42 candidates → top 12 for 10 queries
+2026-07-31 11:40:06.071 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY26/narrative ✅
+2026-07-31 11:40:06.076 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY25/narrative ✅
+2026-07-31 11:40:06.474 | INFO     | agents.guidance_agent:run:124 - [GuidanceAgent] Running for INFY Q4 2026
+2026-07-31 11:40:09.146 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 32 candidates → top 12 for 7 queries
+2026-07-31 11:40:09.152 | INFO     | agents.guidance_agent:run:124 - [GuidanceAgent] Running for INFY Q4 2025
+2026-07-31 11:40:11.101 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 32 candidates → top 12 for 7 queries
+2026-07-31 11:40:12.277 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q3 FY26/narrative ✅
+2026-07-31 11:40:12.679 | INFO     | agents.guidance_agent:run:124 - [GuidanceAgent] Running for INFY Q3 2026
+2026-07-31 11:40:14.852 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 32 candidates → top 12 for 7 queries
+2026-07-31 11:40:17.844 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY26/guidance ✅
+2026-07-31 11:40:18.111 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY25/guidance ✅
+2026-07-31 11:40:18.253 | INFO     | agents.risk_agent:run:95 - [RiskAgent] Running for INFY Q4 2026
+2026-07-31 11:40:21.304 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 36 candidates → top 12 for 10 queries
+2026-07-31 11:40:21.315 | INFO     | agents.risk_agent:run:95 - [RiskAgent] Running for INFY Q4 2025
+2026-07-31 11:40:24.109 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 26 candidates → top 12 for 10 queries
+2026-07-31 11:40:24.147 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q3 FY26/guidance ✅
+2026-07-31 11:40:24.548 | INFO     | agents.risk_agent:run:95 - [RiskAgent] Running for INFY Q3 2026
+2026-07-31 11:40:26.741 | DEBUG    | agents.base:rag_retrieve:404 - [rerank] 6 candidates → top 6 for 10 queries
+2026-07-31 11:40:30.108 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q3 FY26/risk ✅
+2026-07-31 11:40:32.817 | DEBUG    | store.signal_store:save_confidence:255 - Saved confidence signal INFY Q3
+2026-07-31 11:40:33.943 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY26/risk ✅
+2026-07-31 11:40:36.704 | DEBUG    | store.signal_store:save_confidence:255 - Saved confidence signal INFY Q4
+2026-07-31 11:40:36.883 | SUCCESS  | agents.orchestrator:_run_signals_for_quarter:408 - [signals] INFY Q4 FY25/risk ✅
+2026-07-31 11:40:40.169 | DEBUG    | store.signal_store:save_confidence:255 - Saved confidence signal INFY Q4
+2026-07-31 11:40:40.193 | SUCCESS  | agents.orchestrator:run_all_signals:609 - [signals] INFY: 3/3 quarters completed
+2026-07-31 11:40:40.208 | INFO     | agents.base:__exit__:224 - [cost] INFY: 15 calls, $0.11544 → logs/INFY_da3a0e50_20260731_093758_1d00c6a0.cost.log  |  trace → logs/INFY_da3a0e50_20260731_093758_1d00c6a0.log

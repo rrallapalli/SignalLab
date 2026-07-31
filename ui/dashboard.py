@@ -662,7 +662,7 @@ with st.sidebar:
         st.caption(f"Auto-detect: **{auto_q} {auto_yr}** as latest")
 
     model_choice = st.selectbox(
-        "Model", ["gpt-4o-mini","gpt-4o"], index=0,
+        "Model", ["gpt-4o-mini","gpt-4o","gpt-5.6-luna"], index=0,
         help="gpt-4o-mini is faster and cheaper — good for most runs. "
              "gpt-4o gives higher-quality reasoning but costs more per run.",
     )
@@ -719,6 +719,14 @@ if run_btn:
     outcome: dict = {"result": None, "error": None}
     _SENTINEL = "__pipeline_finished__"
 
+    # Stable per-browser-session id so concurrent users' run logs land in their
+    # own folder (logs/session_<id>/). Read on the MAIN thread — st.session_state
+    # isn't safe to touch from the worker — and captured by the closure below.
+    import uuid as _uuid
+    if "run_session_id" not in st.session_state:
+        st.session_state["run_session_id"] = _uuid.uuid4().hex[:8]
+    _session_id = st.session_state["run_session_id"]
+
     def _pipeline_worker():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -731,6 +739,7 @@ if run_btn:
                 # process-wide singleton shared by every browser session, so one
                 # user's choice would change the model under another user's run.
                 model=model_choice,
+                session_id=_session_id,
                 # Fires on THIS worker thread → must only touch the queue.
                 progress=lambda ev, detail: events.put((ev, detail)),
             ))
