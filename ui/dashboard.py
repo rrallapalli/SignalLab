@@ -15,6 +15,7 @@ import pandas as pd
 from models import format_period, parse_period
 from store.signal_store import SignalStore
 from store.vector_store import VectorStore
+from ui.auth import require_login, has_role, header_bar, session_key
 
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -27,6 +28,38 @@ st.set_page_config(
     # sidebar cover the whole screen on a phone before you could see anything.
     initial_sidebar_state="auto",
 )
+
+# ── Authentication gate ──────────────────────────────────────────────────────
+# MUST run before any other UI. Streamlit re-runs the whole script on every
+# interaction, so the gate has to be the first thing after set_page_config —
+# otherwise a not-yet-authorized render could slip through. require_login()
+# stops the script with a sign-in prompt when the user isn't authenticated.
+_user = require_login()
+
+# App chrome: hide Streamlit's Deploy button + developer menu, keep the sidebar
+# toggle but make it (and the log-out control) clearly visible on the light
+# background instead of only appearing on hover.
+st.markdown("""
+<style>
+#MainMenu, [data-testid="stToolbar"], [data-testid="stAppDeployButton"],
+.stAppDeployButton, [data-testid="stStatusWidget"] { display:none !important; }
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stSidebarCollapseButton"] svg, [data-testid="collapsedControl"] svg,
+[data-testid="stExpandSidebarButton"] svg, [data-testid="stBaseButton-headerNoPadding"] svg,
+button[kind="headerNoPadding"] svg {
+  color:#334155 !important; fill:#334155 !important; opacity:1 !important; }
+.sl-userline { text-align:right; color:#475569; font-size:.8rem; margin:.2rem 0 .15rem;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.st-key-_logout_top button {
+  background:#ffffff !important; color:#dc2626 !important;
+  border:1px solid #dc2626 !important; font-weight:600 !important; }
+.st-key-_logout_top button:hover {
+  background:#dc2626 !important; color:#ffffff !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# Identity + log out, top-right (where Deploy used to be).
+header_bar()
 
 st.markdown("""
 <style>
@@ -661,24 +694,45 @@ with st.sidebar:
         auto_q, auto_yr = _latest_completed_quarter()
         st.caption(f"Auto-detect: **{auto_q} {auto_yr}** as latest")
 
+    # Model choices are config-driven: set MODEL_CHOICES in .env (comma-separated)
+    # to add models without editing this file. OPENAI_MODEL is the default pick.
+    # The selection is applied PER RUN (threaded through run_comparison_pipeline),
+    # never by mutating settings — so it can't affect another user's live run.
+    try:
+        from config import settings as _cfg
+        _model_choices = list(getattr(_cfg, "MODEL_CHOICES", None) or [])
+        _default_model = getattr(_cfg, "OPENAI_MODEL", "gpt-4o")
+    except Exception:
+        _model_choices, _default_model = [], "gpt-4o"
+    if not _model_choices:
+        _model_choices = ["gpt-4o-mini", "gpt-4o", "gpt-5.6-luna"]
+    _default_idx = _model_choices.index(_default_model) if _default_model in _model_choices else 0
     model_choice = st.selectbox(
-        "Model", ["gpt-4o-mini","gpt-4o","gpt-5.6-luna"], index=0,
-        help="gpt-4o-mini is faster and cheaper — good for most runs. "
-             "gpt-4o gives higher-quality reasoning but costs more per run.",
+        "Model", _model_choices, index=_default_idx,
+        help="Which LLM runs extraction and narration. Default comes from "
+             "OPENAI_MODEL; add options via MODEL_CHOICES in .env. Applied per "
+             "run, so it never changes the model under another user's run.",
     )
-    run_disabled = not (ticker_in and company_in)
+    _can_run = has_role("analyst", "admin")
+    run_disabled = not (ticker_in and company_in) or not _can_run
+    _run_help = (
+        "Enter both a Ticker and Company name to enable this."
+        if not (ticker_in and company_in) else
+        "Your role can view stored signals but not run new analysis (it spends "
+        "API budget). Ask an admin for the analyst role."
+        if not _can_run else
+        "Fetches NSE/BSE documents and runs all four signal agents "
+        "for Latest, QoQ, and YoY in one click."
+    )
     run_btn = st.button("🚀 Run Analysis", type="primary", use_container_width=True,
-                        disabled=run_disabled,
-                        help="Fetches NSE/BSE documents and runs all four signal agents "
-                             "for Latest, QoQ, and YoY in one click." if not run_disabled
-                             else "Enter both a Ticker and Company name to enable this.")
+                        disabled=run_disabled, help=_run_help)
 
 
 # ════════════════════════════════════════════════════════════
 # PIPELINE EXECUTION
 # ════════════════════════════════════════════════════════════
 
-if run_btn:
+if run_btn and has_role("analyst", "admin"):
     from agents.orchestrator import run_comparison_pipeline
 
     active, active_lock = _running_tickers()
@@ -719,13 +773,11 @@ if run_btn:
     outcome: dict = {"result": None, "error": None}
     _SENTINEL = "__pipeline_finished__"
 
-    # Stable per-browser-session id so concurrent users' run logs land in their
-    # own folder (logs/session_<id>/). Read on the MAIN thread — st.session_state
-    # isn't safe to touch from the worker — and captured by the closure below.
-    import uuid as _uuid
-    if "run_session_id" not in st.session_state:
-        st.session_state["run_session_id"] = _uuid.uuid4().hex[:8]
-    _session_id = st.session_state["run_session_id"]
+    # Per-run log/session key = the authenticated user (and org). Read on the
+    # MAIN thread — st.session_state / st.user aren't safe to touch from the
+    # worker — and captured by the closure below. Logs become attributable:
+    # logs/<org>:<email>_<TICKER>_<stamp>_<runid>.log
+    _session_id = session_key()
 
     def _pipeline_worker():
         loop = asyncio.new_event_loop()

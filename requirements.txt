@@ -41,7 +41,7 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 
 # Dashboard
-streamlit>=1.35.0
+streamlit[auth]>=1.42.0
 plotly>=5.22.0
 streamlit-extras>=0.4.0
 

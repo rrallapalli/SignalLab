@@ -40,3 +40,4 @@ logs/
 # Signal output JSONs
 *.json
 !.env.example
+.streamlit/
