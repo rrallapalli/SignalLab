@@ -34,6 +34,9 @@ __pycache__/
 # Back data/ up (see HOSTING.md); just don't back it up into git.
 data/
 
+# Ignore the whole directory containing log files
+logs/
+
 # Signal output JSONs
 *.json
 !.env.example

@@ -152,7 +152,7 @@ FIELDS: list[Field] = [
         key="OPENAI_MODEL",
         prompt="Reasoning model",
         default="gpt-4o-mini",
-        choices=["gpt-4o-mini", "gpt-4o"],
+        choices=["gpt-4o-mini", "gpt-4o","gpt-5.6-luna"],
         help_text="gpt-4o-mini is cheaper and faster. gpt-4o reasons better but costs ~4x more.",
         comment="gpt-4o-mini = cheap + fast · gpt-4o = higher quality reasoning.",
     ),
@@ -499,7 +499,7 @@ def run_gui(force: bool = False) -> bool:
     ttk.Label(outer, text="Reasoning model", font=label_font).grid(row=row, column=0, sticky="w")
     row += 1
     ttk.Combobox(
-        outer, textvariable=model_var, values=["gpt-4o-mini", "gpt-4o"], state="readonly", width=30
+        outer, textvariable=model_var, values=["gpt-4o-mini", "gpt-4o", "gpt-5.6-luna"], state="readonly", width=30
     ).grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 2))
     row += 1
     ttk.Label(
