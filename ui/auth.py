@@ -111,21 +111,23 @@ def session_key() -> str:
 _LOGIN_STYLE = """<style>
 #MainMenu, [data-testid="stToolbar"], [data-testid="stAppDeployButton"],
 .stAppDeployButton, [data-testid="stStatusWidget"] { display:none !important; }
-.sl-login { max-width: 900px; margin: 2rem auto 0; padding: 0 1rem;
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 2rem !important; }
+.sl-login { max-width: 1040px; margin: 0 auto; padding: 0 1rem;
   font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
 .sl-hero { text-align:center; }
-.sl-logo { font-size: 3rem; line-height:1; }
-.sl-login h1 { font-size: 2.6rem; margin:.3rem 0 .2rem; color:#0f172a; letter-spacing:-.02em; }
-.sl-tag { font-size: 1.15rem; font-weight:600; color:#1e293b; margin:.2rem auto .6rem; max-width:660px; }
-.sl-sub { font-size: 1rem; color:#475569; margin:0 auto; max-width:660px; line-height:1.55; }
-.sl-cards { display:grid; grid-template-columns:repeat(2,1fr); gap:1rem; margin:2rem auto 1.25rem; }
-.sl-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:14px; padding:1.05rem 1.2rem; }
-.sl-card .sl-ic { font-size:1.55rem; }
-.sl-card h3 { margin:.35rem 0 .3rem; font-size:1.03rem; color:#0f172a; }
-.sl-card p { margin:0; font-size:.9rem; color:#64748b; line-height:1.5; }
-.sl-foot { text-align:center; color:#64748b; font-size:.85rem; max-width:640px;
-  margin:1rem auto 0; line-height:1.5; }
-@media (max-width:640px){ .sl-cards{ grid-template-columns:1fr; } }
+.sl-logo { font-size: 2.3rem; line-height:1; }
+.sl-login h1 { font-size: 2.1rem; margin:.15rem 0 .1rem; color:#0f172a; letter-spacing:-.02em; }
+.sl-tag { font-size: 1.03rem; font-weight:600; color:#1e293b; margin:.1rem auto .35rem; max-width:none; }
+.sl-sub { font-size: .9rem; color:#475569; margin:0 auto; max-width:none; line-height:1.45; }
+.sl-cards { display:grid; grid-template-columns:repeat(4,1fr); gap:.7rem; margin:1.1rem auto .9rem; }
+.sl-card { background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:.8rem .85rem; }
+.sl-card .sl-ic { font-size:1.3rem; }
+.sl-card h3 { margin:.3rem 0 .2rem; font-size:.9rem; color:#0f172a; }
+.sl-card p { margin:0; font-size:.78rem; color:#64748b; line-height:1.38; }
+.sl-foot { text-align:center; color:#64748b; font-size:.8rem; width:100%;
+  margin:.8rem 0 0; line-height:1.45; padding:0 1rem; }
+@media (max-width:820px){ .sl-cards{ grid-template-columns:repeat(2,1fr); } }
+@media (max-width:520px){ .sl-cards{ grid-template-columns:1fr; } }
 </style>"""
 
 _LOGIN_HTML = """<div class="sl-login">
@@ -226,22 +228,24 @@ def logout_button() -> None:
             st.logout()
 
 
-def header_bar() -> None:
+def header_bar(title: str | None = None, subtitle: str | None = None) -> None:
     """
-    Top-of-page identity + log out, right-aligned — sits where Streamlit's Deploy
-    button was (which the dashboard CSS hides). Call this once at the very top of
-    the main area. The visibility styling lives in the dashboard CSS block
-    (.st-key-_logout_top / .sl-userline).
+    Top bar for the main area: site title + description on the left (pass `title`
+    and `subtitle`), identity + Log out on the right. In-flow (scrolls with the
+    page). Styling lives in the dashboard CSS (.sl-apptitle / .sl-appsub /
+    .sl-userline / .st-key-_logout_top).
     """
     u = current_user()
-    label = " · ".join(x for x in [
-        u.get("name") or u.get("email") or "signed in",
-        u.get("org_name"),
-        (", ".join(u["roles"]) or "no role"),
-    ] if x)
-    _sp, _c = st.columns([5, 1.5])
-    with _c:
-        st.markdown(f"<div class='sl-userline'>👤 {label}</div>",
+    name = u.get("name") or u.get("email") or "signed in"   # role removed
+    left, right = st.columns([7, 1.3])
+    with left:
+        if title:
+            html = f"<div class='sl-apptitle'>{title}</div>"
+            if subtitle:
+                html += f"<div class='sl-appsub'>{subtitle}</div>"
+            st.markdown(html, unsafe_allow_html=True)
+    with right:
+        st.markdown(f"<div class='sl-userline'>👤 {name}</div>",
                     unsafe_allow_html=True)
         if _DEV_BYPASS:
             st.caption("⚠️ AUTH DISABLED (dev bypass)")

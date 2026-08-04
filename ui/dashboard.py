@@ -41,25 +41,69 @@ _user = require_login()
 # background instead of only appearing on hover.
 st.markdown("""
 <style>
-#MainMenu, [data-testid="stToolbar"], [data-testid="stAppDeployButton"],
-.stAppDeployButton, [data-testid="stStatusWidget"] { display:none !important; }
+/* Hide ONLY the Deploy button + developer menu (not the whole toolbar) */
+[data-testid="stAppDeployButton"], .stAppDeployButton,
+#MainMenu, [data-testid="stMainMenu"], [data-testid="stStatusWidget"] { display:none !important; }
 [data-testid="stHeader"] { background: transparent !important; }
-[data-testid="stSidebarCollapseButton"] svg, [data-testid="collapsedControl"] svg,
-[data-testid="stExpandSidebarButton"] svg, [data-testid="stBaseButton-headerNoPadding"] svg,
-button[kind="headerNoPadding"] svg {
-  color:#334155 !important; fill:#334155 !important; opacity:1 !important; }
-.sl-userline { text-align:right; color:#475569; font-size:.8rem; margin:.2rem 0 .15rem;
+
+/* Collapse control is INSIDE the dark sidebar → LIGHT icon so it's visible.
+   Colour the element AND all its children: the icon is a font-glyph <span>,
+   not an <svg>, which is why colouring only svg had no effect. */
+section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"],
+section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"] *,
+section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] button,
+section[data-testid="stSidebar"] [data-testid="stSidebarHeader"] button *,
+section[data-testid="stSidebar"] button[kind="headerNoPadding"],
+section[data-testid="stSidebar"] button[kind="headerNoPadding"] * {
+  color:#E2E8F0 !important; fill:#E2E8F0 !important; opacity:1 !important; }
+/* Expand control sits on the light main area → DARK icon, always visible */
+[data-testid="stExpandSidebarButton"], [data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"] {
+  display:flex !important; visibility:visible !important; opacity:1 !important; }
+[data-testid="stExpandSidebarButton"] svg, [data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg {
+  color:#1E293B !important; fill:#1E293B !important; opacity:1 !important; }
+
+/* Trim the old header gap */
+[data-testid="stMainBlockContainer"], .block-container { padding-top: 1.2rem !important; }
+
+/* Top bar: site title (left) + identity/Log out (right) */
+.sl-apptitle { font-size:1.35rem; font-weight:700; color:#0f172a; line-height:1.12; }
+.sl-appsub { font-size:.82rem; color:#64748b; margin-top:.1rem; line-height:1.3; }
+.sl-userline { text-align:right; color:#475569; font-size:.8rem; margin:.1rem 0 .5rem;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .st-key-_logout_top button {
-  background:#ffffff !important; color:#dc2626 !important;
-  border:1px solid #dc2626 !important; font-weight:600 !important; }
+  background:#ffffff !important; color:#1E293B !important;
+  border:1px solid #CBD5E1 !important; font-weight:600 !important; }
 .st-key-_logout_top button:hover {
-  background:#dc2626 !important; color:#ffffff !important; }
+  background:#1E293B !important; color:#ffffff !important; border-color:#1E293B !important; }
+
+/* Small, subtle Reset button next to "Stored Tickers" — kept compact so it does
+   not compete with the section heading. Ghost style tuned for the dark sidebar. */
+.st-key-_reset_top button {
+  background:transparent !important; color:#CBD5E1 !important;
+  border:1px solid #475569 !important; font-weight:600 !important;
+  padding:0 .3rem !important; font-size:.72rem !important; min-height:1.5rem !important;
+  line-height:1.35 !important; }
+.st-key-_reset_top button:hover {
+  background:#334155 !important; color:#ffffff !important; border-color:#64748b !important; }
+
+/* Tighten vertical rhythm — less empty space between sections */
+[data-testid="stVerticalBlock"] { gap:.55rem !important; }
+[data-testid="stMainBlockContainer"] hr { margin:.5rem 0 !important; }
+
+/* Compact sidebar so it fits — this is also what gives the Quarter/Model
+   dropdowns room to open fully instead of being clipped at the bottom. */
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap:.4rem !important; }
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+  padding-top:.6rem !important; padding-bottom:1rem !important; }
+section[data-testid="stSidebar"] hr { margin:.35rem 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# Identity + log out, top-right (where Deploy used to be).
-header_bar()
+# Top bar: site title + description (left), identity + Log out (right).
+header_bar(title="📡 Signal Intelligence",
+           subtitle="AI-powered equity signal engine for India-listed companies")
 
 st.markdown("""
 <style>
@@ -644,30 +688,69 @@ def _trend_chart(history: list[dict], col: str, color: str = "#7c3aed",
 # SIDEBAR
 # ════════════════════════════════════════════════════════════
 
-with st.sidebar:
-    st.markdown("## 📡 Signal Intelligence")
-    st.caption("AI-powered equity signal engine for India-listed companies")
-    st.divider()
+def _reset_dashboard():
+    """
+    Return the dashboard to its just-logged-in state: welcome screen AND an empty
+    run form. Deleting a widget's key makes Streamlit re-initialise it to its
+    declared default on the next run (Load -> "— choose —", Ticker/Company ->
+    empty, Quarter -> "Auto", Year -> current year, Model -> OPENAI_MODEL default).
+    Runs inside on_click, i.e. before the widgets re-render, so it is safe.
+    """
+    _exact = {
+        "active_ticker", "pipeline_result",
+        "load_select",                       # Stored Tickers → Load
+        "in_ticker", "in_company",           # Run Analysis text inputs
+        "in_quarter", "in_year", "in_model", # Quarter / Year / Model
+        "sources_quarter_filter", "sources_type_filter",  # Sources tab filters
+    }
+    for _k in list(st.session_state.keys()):
+        if (_k in _exact
+                or _k.startswith("view_period::")
+                or _k.startswith("main_view_period::")):
+            del st.session_state[_k]
 
+
+with st.sidebar:
     stored = ss.get_all_tickers()
     if stored:
-        st.markdown("### Stored Tickers")
+        _t, _rst = st.columns([2.6, 1])
+        with _t:
+            st.markdown("### Stored Tickers")
+        with _rst:
+            st.button("↺ Reset", key="_reset_top", on_click=_reset_dashboard,
+                      use_container_width=True,
+                      help="Clear the current view and return to the starting screen.")
         view_ticker = st.selectbox(
-            "Load", ["— choose —"] + stored,
+            "Load", ["— choose —"] + stored, key="load_select",
             help="Reload a previously-run ticker from the local database without re-running the pipeline.",
         )
+        # Period switcher for the loaded stored ticker lives HERE (under Load),
+        # not in the main area — choosing the ticker and its quarter together.
+        # Sets session_state["view_period::<ticker>"], which the main area reads.
+        if view_ticker != "— choose —":
+            _sb_hist = ss.get_confidence_history(view_ticker, limit=20)
+            _sb_periods: list[str] = []
+            for _r in _sb_hist:
+                _p = format_period(_r.get("quarter", ""), _r.get("fiscal_year", ""))
+                if _p and _p not in _sb_periods:
+                    _sb_periods.append(_p)
+            if _sb_periods:
+                st.selectbox(
+                    "📅 Period · anchors Latest (QoQ / YoY derive from it)",
+                    _sb_periods, index=0, key=f"view_period::{view_ticker}",
+                )
         st.divider()
     else:
         view_ticker = "— choose —"
 
     st.markdown("### Run Analysis")
     ticker_in  = st.text_input(
-        "Ticker", placeholder="INFY, TCS, MSFT…", max_chars=10,
+        "Ticker", placeholder="INFY, TCS, MSFT…", max_chars=10, key="in_ticker",
         help="The NSE trading symbol for the company (e.g. TCS, INFY, RELIANCE). "
              "Documents are fetched directly from NSE and BSE using this symbol.",
     ).upper().strip()
     company_in = st.text_input(
-        "Company name", placeholder="Infosys Limited",
+        "Company name", placeholder="Infosys Limited", key="in_company",
         help="Full legal/listed name — used to resolve the matching BSE scrip code. "
              "Closer to the official listed name = more reliable match.",
     )
@@ -675,7 +758,7 @@ with st.sidebar:
     col_q, col_y = st.columns(2)
     with col_q:
         quarter_in = st.selectbox(
-            "Quarter", ["Auto", "Q1","Q2","Q3","Q4"], index=0,
+            "Quarter", ["Auto", "Q1","Q2","Q3","Q4"], index=0, key="in_quarter",
             help="Leave on Auto to analyze the most recently completed quarter. "
                  "Pick a specific quarter to anchor the analysis to an earlier period instead.",
         )
@@ -683,6 +766,7 @@ with st.sidebar:
         from datetime import datetime as _dt_year
         year_in = st.number_input(
             "Year", min_value=2019, max_value=2030, value=_dt_year.now().year, step=1,
+            key="in_year",
             help="Only used when Quarter is set to a specific value (ignored on Auto).",
         )
 
@@ -708,7 +792,7 @@ with st.sidebar:
         _model_choices = ["gpt-4o-mini", "gpt-4o", "gpt-5.6-luna"]
     _default_idx = _model_choices.index(_default_model) if _default_model in _model_choices else 0
     model_choice = st.selectbox(
-        "Model", _model_choices, index=_default_idx,
+        "Model", _model_choices, index=_default_idx, key="in_model",
         help="Which LLM runs extraction and narration. Default comes from "
              "OPENAI_MODEL; add options via MODEL_CHOICES in .env. Applied per "
              "run, so it never changes the model under another user's run.",
@@ -895,7 +979,14 @@ elif view_ticker != "— choose —":
         st.session_state.pop("pipeline_result", None)
     st.session_state["active_ticker"] = view_ticker
 else:
-    active_ticker = st.session_state.get("active_ticker")
+    # Load is on "— choose —": keep showing ONLY while a fresh run is still
+    # active; otherwise clear the persisted ticker and return to the welcome
+    # screen (this is what makes deselecting a stored ticker reset the view).
+    if st.session_state.get("pipeline_result"):
+        active_ticker = st.session_state.get("active_ticker")
+    else:
+        active_ticker = None
+        st.session_state.pop("active_ticker", None)
 
 if not active_ticker:
     st.markdown("""
@@ -946,13 +1037,29 @@ for _r in conf_history:
 # just ran one, otherwise the most recent stored quarter.
 result = st.session_state.get("pipeline_result")
 _fresh_label = result.get("latest_label") if (result and result.get("latest")) else None
-_default_idx = _avail_periods.index(_fresh_label) if _fresh_label in _avail_periods else 0
-view_period = st.selectbox(
-    "📅 View period  ·  anchors the Latest column (QoQ / YoY derive from it)",
-    _avail_periods or ["—"],
-    index=_default_idx if _avail_periods else 0,
-    key=f"view_period::{active_ticker}",
-)
+_sidebar_key = f"view_period::{active_ticker}"
+_is_stored_view = (view_ticker != "— choose —" and active_ticker == view_ticker
+                   and _sidebar_key in st.session_state)
+_is_fresh_run = bool(_fresh_label and _fresh_label in _avail_periods)
+
+if _is_stored_view:
+    # Stored ticker is loaded → the picker lives in the SIDEBAR (under Load).
+    view_period = st.session_state[_sidebar_key]
+    if view_period not in _avail_periods:
+        view_period = _avail_periods[0] if _avail_periods else "—"
+elif _is_fresh_run:
+    # Just ran the pipeline → inline picker to browse the run's periods.
+    view_period = st.selectbox(
+        "📅 View period  ·  anchors the Latest column (QoQ / YoY derive from it)",
+        _avail_periods or ["—"],
+        index=_avail_periods.index(_fresh_label),
+        key=f"main_view_period::{active_ticker}",
+    )
+else:
+    # Load is on "— choose —" but a ticker is still showing from an earlier
+    # selection (session-persisted). No picker here — that belongs to the
+    # stored-ticker flow; just default to the most recent stored period.
+    view_period = _avail_periods[0] if _avail_periods else "—"
 
 # Use the freshly-run bundles only while the user is still viewing that exact
 # period; otherwise reconstruct the chosen period from the database.
