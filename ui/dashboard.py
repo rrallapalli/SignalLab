@@ -691,23 +691,41 @@ def _trend_chart(history: list[dict], col: str, color: str = "#7c3aed",
 def _reset_dashboard():
     """
     Return the dashboard to its just-logged-in state: welcome screen AND an empty
-    run form. Deleting a widget's key makes Streamlit re-initialise it to its
-    declared default on the next run (Load -> "— choose —", Ticker/Company ->
-    empty, Quarter -> "Auto", Year -> current year, Model -> OPENAI_MODEL default).
-    Runs inside on_click, i.e. before the widgets re-render, so it is safe.
+    run form. View state is deleted; widget values are ASSIGNED to their login
+    defaults (a valid option/value). Assigning is more reliable than deleting for
+    selectboxes — deleting a selectbox key does not always re-default in every
+    Streamlit build, which is why the Load dropdown wasn't resetting.
     """
-    _exact = {
-        "active_ticker", "pipeline_result",
-        "load_select",                       # Stored Tickers → Load
-        "in_ticker", "in_company",           # Run Analysis text inputs
-        "in_quarter", "in_year", "in_model", # Quarter / Year / Model
-        "sources_quarter_filter", "sources_type_filter",  # Sources tab filters
-    }
+    from datetime import datetime as _dt
+    # 1) Non-widget view state → delete.
     for _k in list(st.session_state.keys()):
-        if (_k in _exact
+        if (_k in ("active_ticker", "pipeline_result")
                 or _k.startswith("view_period::")
                 or _k.startswith("main_view_period::")):
             del st.session_state[_k]
+    # 2) Resolve the Model default the same way the sidebar does.
+    try:
+        from config import settings as _cfg
+        _choices = list(getattr(_cfg, "MODEL_CHOICES", None) or []) \
+            or ["gpt-4o-mini", "gpt-4o", "gpt-5.6-luna"]
+        _dm = getattr(_cfg, "OPENAI_MODEL", "gpt-4o")
+        if _dm not in _choices:
+            _dm = _choices[0]
+    except Exception:
+        _dm = "gpt-4o"
+    # 3) Widget values → set to their declared login defaults (valid values).
+    st.session_state.update({
+        "load_select": "— choose —",
+        "in_ticker":   "",
+        "in_company":  "",
+        "in_quarter":  "Auto",
+        "in_year":     _dt.now().year,
+        "in_model":    _dm,
+    })
+    # 4) Sources-tab filters depend on the (now-cleared) ticker → drop them so
+    #    they re-default when that tab next renders.
+    for _k in ("sources_quarter_filter", "sources_type_filter"):
+        st.session_state.pop(_k, None)
 
 
 with st.sidebar:
@@ -1360,6 +1378,98 @@ with tab1:
                 st.caption("No data for this period.")
 
 
+# ── Display-time QoQ recompute (narrative + risk) ────────────────────────────
+# The scoring-time comparison could race: in one run a column's prior quarter may
+# still be mid-scoring (concurrency) or not be in the run at all, so the agent
+# saw an empty prior and flagged "no baseline". Here we recompute the comparison
+# at DISPLAY time against whatever is actually in the store now — deterministic
+# and race-free — reusing the exact classifiers the agents use (no divergence).
+# A missing baseline is flagged ONLY when the prior quarter was truly never scored.
+def _recompute_narr(nd, period_label):
+    """Returns (updated_nd, prior_available, prior_label)."""
+    from agents.narrative_agent import _classify_theme
+    from agents.orchestrator import _prior_quarter
+    from agents.prior_lookup import match_prior
+    from agents.base import safe_int, safe_float
+    if not nd or not nd.get("themes"):
+        return nd, True, "—"
+    q, yr = parse_period(period_label)
+    if not (q and yr):
+        return nd, True, "—"
+    pq, pyr = _prior_quarter(q, int(yr))
+    prow = ss.get_signal_row("narrative", active_ticker, pq, pyr)
+    prior_available = prow is not None
+    pmap = {}
+    for pt in ((prow or {}).get("themes") or []):
+        nm = pt.get("theme", "")
+        if nm:
+            pmap[nm] = (safe_int(pt.get("evidence_count_current")),
+                        safe_float(pt.get("sentiment_current")))
+    pnames = list(pmap.keys())
+    accel, emerg, fade, risky, new_themes = [], [], [], [], []
+    for t in nd["themes"]:
+        name = t.get("theme", "")
+        cur_n = safe_int(t.get("evidence_count_current"))
+        cur_s = safe_float(t.get("sentiment_current"))
+        m = match_prior(name, pnames) if pnames else None
+        prev_n, prev_s = pmap.get(m, (0, 0.0)) if m else (0, 0.0)
+        status, _ = _classify_theme(cur_n, prev_n, cur_s, prev_s)
+        sv = getattr(status, "value", str(status))
+        t2 = dict(t)
+        t2.update(status=sv, evidence_count_previous=prev_n,
+                  count_change=cur_n - prev_n, sentiment_previous=prev_s,
+                  sentiment_change=round(cur_s - prev_s, 3))
+        new_themes.append(t2)
+        {"accelerating": accel, "emerging": emerg,
+         "fading": fade, "newly_risky": risky}.get(sv, []).append(name)
+    pos, neg = len(accel) + len(emerg), len(fade) + len(risky)
+    overall = ("positive" if pos > neg else "negative" if neg > pos else
+               "mixed" if (pos and neg) else "neutral")
+    nd2 = dict(nd, themes=new_themes, accelerating=accel, emerging=emerg,
+               fading=fade, newly_risky=risky, overall_shift=overall)
+    return nd2, prior_available, format_period(pq, pyr)
+
+
+def _recompute_risk(rd, period_label):
+    """Returns (updated_rd, prior_available, prior_label)."""
+    from agents.risk_agent import _classify_risk_status
+    from agents.orchestrator import _prior_quarter
+    from agents.prior_lookup import match_prior
+    from agents.base import safe_int
+    if not rd or not rd.get("risks"):
+        return rd, True, "—"
+    q, yr = parse_period(period_label)
+    if not (q and yr):
+        return rd, True, "—"
+    pq, pyr = _prior_quarter(q, int(yr))
+    prow = ss.get_signal_row("risk", active_ticker, pq, pyr)
+    prior_available = prow is not None
+    pcounts = {}
+    for pr in ((prow or {}).get("risks") or []):
+        nm = pr.get("risk", "")
+        if nm:
+            pcounts[nm] = safe_int(pr.get("mention_count_current"))
+    pnames = list(pcounts.keys())
+    new_r, esc, dim, out = [], [], [], []
+    for r in rd["risks"]:
+        name = r.get("risk", "")
+        cur = safe_int(r.get("mention_count_current"))
+        m = match_prior(name, pnames) if pnames else None
+        prev = pcounts.get(m, 0) if m else 0
+        status, _ = _classify_risk_status(cur, prev)
+        sv = getattr(status, "value", str(status))
+        r2 = dict(r)
+        r2.update(status=sv, mention_count_previous=prev, count_change=cur - prev)
+        out.append(r2)
+        {"newly_material": new_r, "escalating": esc,
+         "diminishing": dim}.get(sv, []).append(name)
+    up, down = len(new_r) + len(esc), len(dim)
+    direction = "increasing" if up > down else "decreasing" if down > up else "stable"
+    rd2 = dict(rd, risks=out, new_risks=new_r, escalating=esc,
+               diminishing=dim, overall_risk_direction=direction)
+    return rd2, prior_available, format_period(pq, pyr)
+
+
 # ── Tab 2: Narrative Shift ────────────────────────────────────────────────────
 
 with tab2:
@@ -1381,6 +1491,14 @@ with tab2:
     ln = _narr(latest_b)
     qn = _narr(qoq_b)
     yn = _narr(yoy_b)
+
+    # Recompute the QoQ comparison at display time (race-free) and capture whether
+    # each column's prior quarter genuinely exists in the store.
+    ln, _npa_l, _npl_l = _recompute_narr(ln, label_l)
+    qn, _npa_q, _npl_q = _recompute_narr(qn, label_q)
+    yn, _npa_y, _npl_y = _recompute_narr(yn, label_y)
+    _narr_pa = {label_l: _npa_l, label_q: _npa_q, label_y: _npa_y}
+    _narr_pl = {label_l: _npl_l, label_q: _npl_q, label_y: _npl_y}
 
     shift_map  = {"positive":"#22c55e","negative":"#ef4444","mixed":"#f97316","neutral":"#94a3b8"}
 
@@ -1421,10 +1539,8 @@ with tab2:
             if not nd:
                 st.caption("No data")
                 continue
-            _pq, _pyr = parse_period(period_label)
-            _man = ss.get_manifest("narrative", active_ticker, _pq, _pyr) if _pyr else None
-            if _man and _man.get("prior_available") is False:
-                st.caption(f"⚠ No prior baseline vs {_man.get('prior_period','—')} — "
+            if not _narr_pa.get(period_label, True):
+                st.caption(f"⚠ No prior baseline vs {_narr_pl.get(period_label,'—')} — "
                            f"themes shown against an empty prior.")
             for label, key, pill_cls in sections:
                 items = nd.get(key,[]) or []
@@ -1681,6 +1797,13 @@ with tab4:
     qr = _risk(qoq_b)
     yr_ = _risk(yoy_b)
 
+    # Recompute the QoQ comparison at display time (race-free) + real baselines.
+    lr, _rpa_l, _rpl_l = _recompute_risk(lr, label_l)
+    qr, _rpa_q, _rpl_q = _recompute_risk(qr, label_q)
+    yr_, _rpa_y, _rpl_y = _recompute_risk(yr_, label_y)
+    _risk_pa = {label_l: _rpa_l, label_q: _rpa_q, label_y: _rpa_y}
+    _risk_pl = {label_l: _rpl_l, label_q: _rpl_q, label_y: _rpl_y}
+
     risk_dir_map = {"increasing":"#ef4444","stable":"#eab308","decreasing":"#22c55e"}
 
     def _risk_cell(rd):
@@ -1716,10 +1839,8 @@ with tab4:
     for col, rd, lbl in [(r1,lr,label_l),(r2,qr,label_q),(r3,yr_,label_y)]:
         with col:
             st.markdown(f"**{lbl}**")
-            _rpq, _rpyr = parse_period(lbl)
-            _rman = ss.get_manifest("risk", active_ticker, _rpq, _rpyr) if _rpyr else None
-            if _rman and _rman.get("prior_available") is False:
-                st.caption(f"⚠ No prior baseline vs {_rman.get('prior_period','—')} — "
+            if not _risk_pa.get(lbl, True):
+                st.caption(f"⚠ No prior baseline vs {_risk_pl.get(lbl,'—')} — "
                            f"risks shown against an empty prior.")
             risks = rd.get("risks",[]) or []
             if not risks:
